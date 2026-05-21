@@ -174,10 +174,158 @@ def detect_dangling_o2o_relations(src: SqliteInput) -> pl.DataFrame:
     ).select(cols).cast({c: pl.Utf8 for c in cols})
 
 
+# ---------------------------------------------------------------------------
+# New detectors
+# ---------------------------------------------------------------------------
+
+def detect_duplicate_object_ids(src: SqliteInput) -> pl.DataFrame:
+    """Find ocel_ids that appear more than once in the main object table.
+
+    One row is emitted per duplicated ocel_id.  ``ocel_types`` lists every
+    type value seen for that id (comma-separated); ``count`` is the number of
+    duplicate rows.
+    """
+    with _connect(src) as conn:
+        objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn)
+
+    cols = ["ocel_id", "ocel_types", "count", "issue"]
+    return (
+        objects
+        .group_by("ocel_id")
+        .agg(
+            pl.len().alias("count"),
+            pl.col("ocel_type").unique().sort().str.join(", ").alias("ocel_types"),
+        )
+        .filter(pl.col("count") > 1)
+        .with_columns(pl.lit("duplicate_id").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
+def detect_duplicate_object_attributes(src: SqliteInput) -> pl.DataFrame:
+    """Find objects within the same type-table that share identical attribute
+    values but carry different ocel_ids.
+
+    One row is emitted per duplicate group.  ``ocel_ids`` lists every id that
+    shares the same attribute fingerprint (comma-separated).
+    """
+    with _connect(src) as conn:
+        rows: list[dict] = []
+        for ocel_type, table in _object_type_tables(conn):
+            attr_cols = [c for c, _ in _column_info(conn, table)]
+            if not attr_cols:
+                continue
+            quoted = ", ".join(f'"{c}"' for c in attr_cols)
+            raw = conn.execute(
+                f'SELECT ocel_id, {quoted} FROM "{table}"'
+            ).fetchall()
+
+            # Group ocel_ids by their attribute fingerprint.
+            groups: dict[tuple, list[str]] = {}
+            for ocel_id, *values in raw:
+                key = tuple(values)
+                groups.setdefault(key, []).append(ocel_id)
+
+            for key, ids in groups.items():
+                if len(ids) < 2:
+                    continue
+                rows.append({
+                    "object_type": ocel_type,
+                    "ocel_ids": ", ".join(ids),
+                    "duplicate_count": str(len(ids)),
+                    "attribute_values": str(dict(zip(attr_cols, key))),
+                    "issue": "duplicate_attributes",
+                })
+    return _frame(
+        rows,
+        ["object_type", "ocel_ids", "duplicate_count", "attribute_values", "issue"],
+    )
+
+
+def detect_missing_object_types(src: SqliteInput) -> pl.DataFrame:
+    """Find objects in the main object table whose ocel_type is NULL or
+    empty/whitespace."""
+    with _connect(src) as conn:
+        objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn)
+
+    cols = ["ocel_id", "ocel_type", "issue"]
+    return (
+        objects
+        .filter(
+            pl.col("ocel_type").is_null()
+            | (pl.col("ocel_type").str.strip_chars() == "")
+        )
+        .with_columns(pl.lit("missing_object_type").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
+def detect_dangling_e2o_relations(src: SqliteInput) -> pl.DataFrame:
+    """Find event-to-object relationships referencing a non-existent event,
+    a non-existent object, or both.
+
+    Columns mirror detect_dangling_o2o_relations:
+        ocel_event_id, event_type, ocel_object_id, object_type,
+        ocel_qualifier, missing_side, issue
+    ``missing_side`` is ``"event"``, ``"object"``, or ``"both"``.
+    """
+    with _connect(src) as conn:
+        e2o = pl.read_database(
+            "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object",
+            conn,
+        )
+        events  = pl.read_database("SELECT ocel_id, ocel_type FROM event",  conn).unique(subset=["ocel_id"])
+        objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn).unique(subset=["ocel_id"])
+
+    enriched = (
+        e2o
+        .join(
+            events.rename({"ocel_id": "ocel_event_id", "ocel_type": "event_type"}),
+            on="ocel_event_id",
+            how="left",
+        )
+        .join(
+            objects.rename({"ocel_id": "ocel_object_id", "ocel_type": "object_type"}),
+            on="ocel_object_id",
+            how="left",
+        )
+    )
+
+    violations = enriched.filter(
+        pl.col("event_type").is_null() | pl.col("object_type").is_null()
+    )
+
+    cols = [
+        "ocel_event_id", "event_type",
+        "ocel_object_id", "object_type",
+        "ocel_qualifier", "missing_side", "issue",
+    ]
+    return (
+        violations
+        .with_columns(
+            pl.when(pl.col("event_type").is_null() & pl.col("object_type").is_null())
+            .then(pl.lit("both"))
+            .when(pl.col("event_type").is_null())
+            .then(pl.lit("event"))
+            .otherwise(pl.lit("object"))
+            .alias("missing_side"),
+            pl.lit("dangling_e2o").alias("issue"),
+        )
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
 def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
-        "missing_attributes": detect_missing_attributes(src),
-        "incorrect_datatypes": detect_incorrect_datatypes(src),
-        "dangling_o2o_relations": detect_dangling_o2o_relations(src),
+        "missing_attributes":        detect_missing_attributes(src),
+        "incorrect_datatypes":       detect_incorrect_datatypes(src),
+        "dangling_o2o_relations":    detect_dangling_o2o_relations(src),
+        "duplicate_object_ids":      detect_duplicate_object_ids(src),
+        "duplicate_object_attributes": detect_duplicate_object_attributes(src),
+        "missing_object_types":      detect_missing_object_types(src),
+        "dangling_e2o_relations":    detect_dangling_e2o_relations(src),
     }
