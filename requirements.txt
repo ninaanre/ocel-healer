@@ -1,0 +1,5 @@
+pm4py
+polars
+jupyter
+ipykernel
+marimo
