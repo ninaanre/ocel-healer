@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocel-healer"
+version = "0.1.0"
+description = "Rule-based detection and repair of data-quality issues in OCEL2 logs."
+requires-python = ">=3.11"
+dependencies = [
+    "pm4py",
+    "polars",
+    "jupyter",
+    "ipykernel",
+    "marimo",
+]
+
+# Treat `src` itself as the importable package, so existing imports like
+# `from src.detection.error_detection import detect_all` keep working.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
