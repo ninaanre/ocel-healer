@@ -6,11 +6,14 @@ app = marimo.App(width="medium")
 @app.cell
 def imports():
     import os
-    import sys
     import marimo as mo
-    sys.path.insert(0, "..")
+    from pathlib import Path
     from src.detection.error_detection import detect_all
-    return mo, os, detect_all
+
+    # Resolve the project root once so the dashboard works from any cwd.
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    DATA_DIR = PROJECT_ROOT / "data"
+    return mo, os, detect_all, DATA_DIR
 
 
 @app.cell
@@ -26,8 +29,8 @@ def header(mo):
 
 
 @app.cell
-def file_picker(mo, os):
-    files = sorted(f for f in os.listdir("../data") if f.endswith(".sqlite"))
+def file_picker(mo, os, DATA_DIR):
+    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
     default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
     file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL file")
     file_picker
@@ -35,8 +38,8 @@ def file_picker(mo, os):
 
 
 @app.cell
-def load_results(detect_all, file_picker):
-    results = detect_all(f"../data/{file_picker.value}")
+def load_results(detect_all, file_picker, DATA_DIR):
+    results = detect_all(str(DATA_DIR / file_picker.value))
     return (results,)
 
 
