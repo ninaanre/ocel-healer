@@ -1,5 +1,6 @@
 import marimo
 
+__generated_with = "0.23.6"
 app = marimo.App(width="medium")
 
 
@@ -28,19 +29,17 @@ def imports():
 
 @app.cell
 def header(mo):
-    mo.md(
-        """
-        # OCEL Error Detection Dashboard
-        Inspect rule-based data-quality violations in an object-centric event log,
-        and ask a local LLM domain expert to suggest a repair for one.
-        Pick a SQLite log and browse the violations per detector.
-        """
-    )
+    mo.md("""
+    # OCEL Error Detection Dashboard
+    Inspect rule-based data-quality violations in an object-centric event log,
+    and ask a local LLM domain expert to suggest a repair for one.
+    Pick a SQLite log and browse the violations per detector.
+    """)
     return
 
 
 @app.cell
-def llm_status(mo, ollama_ready, MODEL):
+def llm_status(MODEL, mo, ollama_ready):
     reachable, models = ollama_ready()
     llm_enabled = reachable and MODEL in models
     if not reachable:
@@ -60,7 +59,7 @@ def llm_status(mo, ollama_ready, MODEL):
 
 
 @app.cell
-def file_picker(mo, os, DATA_DIR):
+def file_picker(DATA_DIR, mo, os):
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
     default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
     file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL file")
@@ -77,7 +76,7 @@ def refresh_btn(mo):
 
 
 @app.cell
-def load_results(detect_all, file_picker, DATA_DIR, refresh):
+def load_results(DATA_DIR, detect_all, file_picker, refresh):
     _ = refresh.value  # subscribe so this cell re-runs on refresh.
     sqlite_path = str(DATA_DIR / file_picker.value)
     results = detect_all(sqlite_path)
@@ -206,22 +205,15 @@ def sections(mo, results):
     return
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Domain expert (LLM): suggest and optionally apply a repair for one violation.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 @app.cell
 def expert_header(mo):
-    mo.md(
-        """
-        ---
-        ## Domain Expert (LLM)
-        Pick a detector and a violation row, then ask the LLM to suggest a
-        repair. Suggestions are dry-run by default — review the SQL before
-        committing.
-        """
-    )
+    mo.md("""
+    ---
+    ## Domain Expert (LLM)
+    Pick a detector and a violation row, then ask the LLM to suggest a
+    repair. Suggestions are dry-run by default — review the SQL before
+    committing.
+    """)
     return
 
 
@@ -238,7 +230,7 @@ def expert_pickers(mo, results):
 
 
 @app.cell
-def expert_row_picker(mo, results, detector):
+def expert_row_picker(detector, mo, results):
     if detector.value is None:
         row_picker = mo.md("_No violations to pick from._")
     else:
@@ -258,18 +250,24 @@ def expert_row_picker(mo, results, detector):
 
 
 @app.cell
-def expert_buttons(mo, llm_enabled):
+def expert_buttons(llm_enabled, mo):
     ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
     apply_dryrun_btn = mo.ui.run_button(label="Apply (dry-run)")
     apply_commit_btn = mo.ui.run_button(label="Apply (commit)", kind="danger")
     mo.hstack([ask_btn, apply_dryrun_btn, apply_commit_btn], justify="start")
-    return ask_btn, apply_commit_btn, apply_dryrun_btn
+    return apply_commit_btn, apply_dryrun_btn, ask_btn
 
 
 @app.cell
 def expert_suggest(
-    mo, results, detector, row_picker, ask_btn,
-    suggest_repair, sqlite_path, llm_enabled,
+    ask_btn,
+    detector,
+    llm_enabled,
+    mo,
+    results,
+    row_picker,
+    sqlite_path,
+    suggest_repair,
 ):
     def _render(action):
         if action["kind"] == "noop":
@@ -314,7 +312,12 @@ def expert_suggest(
 
 @app.cell
 def expert_apply(
-    mo, apply_dryrun_btn, apply_commit_btn, suggestion, apply_repair, sqlite_path,
+    apply_commit_btn,
+    apply_dryrun_btn,
+    apply_repair,
+    mo,
+    sqlite_path,
+    suggestion,
 ):
     apply_view = None
     if suggestion is None:
