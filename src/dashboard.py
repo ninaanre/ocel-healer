@@ -9,11 +9,21 @@ def imports():
     import marimo as mo
     from pathlib import Path
     from src.detection.error_detection import detect_all
+    from src.llm import apply_repair, ollama_ready, suggest_repair, MODEL
 
     # Resolve the project root once so the dashboard works from any cwd.
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     DATA_DIR = PROJECT_ROOT / "data"
-    return mo, os, detect_all, DATA_DIR
+    return (
+        DATA_DIR,
+        MODEL,
+        apply_repair,
+        detect_all,
+        mo,
+        ollama_ready,
+        os,
+        suggest_repair,
+    )
 
 
 @app.cell
@@ -21,11 +31,32 @@ def header(mo):
     mo.md(
         """
         # OCEL Error Detection Dashboard
-        Inspect rule-based data-quality violations in an object-centric event log.
+        Inspect rule-based data-quality violations in an object-centric event log,
+        and ask a local LLM domain expert to suggest a repair for one.
         Pick a SQLite log and browse the violations per detector.
         """
     )
     return
+
+
+@app.cell
+def llm_status(mo, ollama_ready, MODEL):
+    reachable, models = ollama_ready()
+    llm_enabled = reachable and MODEL in models
+    if not reachable:
+        status = mo.md(
+            f"⚠️ Ollama not reachable. The domain-expert features are disabled. "
+            f"Run `ollama serve` and `ollama pull {MODEL}` to enable them."
+        ).callout(kind="warn")
+    elif MODEL not in models:
+        status = mo.md(
+            f"⚠️ Ollama is up but model `{MODEL}` is not pulled. "
+            f"Run `ollama pull {MODEL}`. Available: {models or 'none'}."
+        ).callout(kind="warn")
+    else:
+        status = mo.md(f"✅ LLM ready: model `{MODEL}`.").callout(kind="success")
+    status
+    return (llm_enabled,)
 
 
 @app.cell
@@ -38,9 +69,19 @@ def file_picker(mo, os, DATA_DIR):
 
 
 @app.cell
-def load_results(detect_all, file_picker, DATA_DIR):
-    results = detect_all(str(DATA_DIR / file_picker.value))
-    return (results,)
+def refresh_btn(mo):
+    # Click after applying a repair to re-run detection.
+    refresh = mo.ui.refresh(label="Re-run detection", default_interval=None)
+    refresh
+    return (refresh,)
+
+
+@app.cell
+def load_results(detect_all, file_picker, DATA_DIR, refresh):
+    _ = refresh.value  # subscribe so this cell re-runs on refresh.
+    sqlite_path = str(DATA_DIR / file_picker.value)
+    results = detect_all(sqlite_path)
+    return results, sqlite_path
 
 
 @app.cell
@@ -100,7 +141,6 @@ def sections(mo, results):
         )
 
     def _bad_e2o(row, c):
-        # mirrors _bad_o2o: highlight the id whose referenced entity is absent
         side = row["missing_side"]
         return (
             (c == "ocel_event_id"  and side in ("event",  "both"))
@@ -108,7 +148,6 @@ def sections(mo, results):
         )
 
     def _bad_dup_id(_row, c):
-        # the ocel_ids column lists every id in the duplicate group
         return c == "ocel_ids"
 
     def _bad_dup_attrs(_row, c):
@@ -164,6 +203,136 @@ def sections(mo, results):
     ])
 
     mo.vstack([attr_section, obj_section, rel_section], gap=0)
+    return
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain expert (LLM): suggest and optionally apply a repair for one violation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.cell
+def expert_header(mo):
+    mo.md(
+        """
+        ---
+        ## Domain Expert (LLM)
+        Pick a detector and a violation row, then ask the LLM to suggest a
+        repair. Suggestions are dry-run by default — review the SQL before
+        committing.
+        """
+    )
+    return
+
+
+@app.cell
+def expert_pickers(mo, results):
+    # Only offer detectors that actually have violations to act on.
+    available = [k for k, df in results.items() if df.height > 0]
+    detector = mo.ui.dropdown(
+        options=available, value=(available[0] if available else None),
+        label="Detector",
+    )
+    detector
+    return (detector,)
+
+
+@app.cell
+def expert_row_picker(mo, results, detector):
+    if detector.value is None:
+        row_picker = mo.md("_No violations to pick from._")
+    else:
+        _df = results[detector.value]
+        _labels = []
+        for _i, _row in enumerate(_df.iter_rows(named=True)):
+            _keys = [k for k in ("ocel_id", "ocel_event_id", "ocel_source_id", "ocel_ids") if k in _row]
+            _preview = ", ".join(f"{k}={_row[k]}" for k in _keys[:2]) or f"row {_i}"
+            _labels.append(f"#{_i}  {_preview}")
+        row_picker = mo.ui.dropdown(
+            options=dict(zip(_labels, range(len(_labels)))),
+            value=_labels[0] if _labels else None,
+            label="Violation",
+        )
+    row_picker
+    return (row_picker,)
+
+
+@app.cell
+def expert_buttons(mo, llm_enabled):
+    ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
+    apply_dryrun_btn = mo.ui.run_button(label="Apply (dry-run)")
+    apply_commit_btn = mo.ui.run_button(label="Apply (commit)", kind="danger")
+    mo.hstack([ask_btn, apply_dryrun_btn, apply_commit_btn], justify="start")
+    return ask_btn, apply_commit_btn, apply_dryrun_btn
+
+
+@app.cell
+def expert_suggest(
+    mo, results, detector, row_picker, ask_btn,
+    suggest_repair, sqlite_path, llm_enabled,
+):
+    def _render(action):
+        if action["kind"] == "noop":
+            return mo.md(
+                f"**No-op suggestion** (confidence {action['confidence']:.2f}).\n\n"
+                f"Rationale: {action['rationale']}"
+            ).callout(kind="info")
+        bar_pct = int(round(action["confidence"] * 100))
+        return mo.Html(
+            f"<div style='font-family:system-ui'>"
+            f"<div><b>Kind:</b> {action['kind']} &nbsp; <b>Table:</b> {action['target_table']} "
+            f"&nbsp; <b>Column:</b> {action['column'] or '—'}</div>"
+            f"<div style='margin:6px 0'><b>Old →</b> <code>{action['old_value']!r}</code> "
+            f"&nbsp; <b>New →</b> <code>{action['new_value']!r}</code></div>"
+            f"<div><b>Rationale:</b> {action['rationale']}</div>"
+            f"<div style='margin-top:6px'><b>Confidence:</b> {action['confidence']:.2f}"
+            f" <div style='display:inline-block; background:#eee; border-radius:4px; "
+            f"width:200px; height:10px; vertical-align:middle; margin-left:8px;'>"
+            f"<div style='background:#0969da; width:{bar_pct}%; height:10px; border-radius:4px;'></div>"
+            f"</div></div></div>"
+        )
+
+    suggestion = None
+    suggest_view = None
+    if not llm_enabled:
+        suggest_view = mo.md("_Enable Ollama to use the domain expert._")
+    elif ask_btn.value and detector.value is not None and getattr(row_picker, "value", None) is not None:
+        _df = results[detector.value]
+        _idx = row_picker.value
+        if _idx is None or _idx >= _df.height:
+            suggest_view = mo.md("_Pick a violation row first._")
+        else:
+            _row = dict(_df.row(_idx, named=True))
+            try:
+                suggestion = suggest_repair(detector.value, _row, sqlite_path)
+                suggest_view = _render(suggestion)
+            except Exception as e:
+                suggest_view = mo.md(f"❌ LLM call failed: `{e}`").callout(kind="danger")
+    suggest_view
+    return (suggestion,)
+
+
+@app.cell
+def expert_apply(
+    mo, apply_dryrun_btn, apply_commit_btn, suggestion, apply_repair, sqlite_path,
+):
+    apply_view = None
+    if suggestion is None:
+        if apply_dryrun_btn.value or apply_commit_btn.value:
+            apply_view = mo.md("_Run the domain expert first._")
+    elif apply_commit_btn.value:
+        try:
+            _msg = apply_repair(sqlite_path, suggestion, dry_run=False)
+            apply_view = mo.md(f"✅\n\n```sql\n{_msg}\n```\n\nClick **Re-run detection** above to refresh the tables.").callout(kind="success")
+        except Exception as e:
+            apply_view = mo.md(f"❌ Apply failed: `{e}`").callout(kind="danger")
+    elif apply_dryrun_btn.value:
+        try:
+            _msg = apply_repair(sqlite_path, suggestion, dry_run=True)
+            apply_view = mo.md(f"```sql\n{_msg}\n```").callout(kind="info")
+        except Exception as e:
+            apply_view = mo.md(f"❌ Render failed: `{e}`").callout(kind="danger")
+    apply_view
     return
 
 
