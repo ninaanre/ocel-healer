@@ -83,8 +83,35 @@ def load_results(DATA_DIR, detect_all, file_picker, refresh):
 
 
 @app.cell
-def sections(mo, results):
+def pagers(mo, results):
+    # One Prev/Next button pair per detector. Each button accumulates clicks
+    # via on_click; current page = next.value - prev.value, clamped to the
+    # valid range. The buttons are bundled into mo.ui.dictionary so that
+    # clicks in one cell flow back through marimo's reactivity graph and
+    # re-run the renderer below — a plain dict would NOT propagate clicks.
+    PAGE_SIZE = 10
+
+    pager_buttons = mo.ui.dictionary({
+        f"{key}__prev": mo.ui.button(
+            value=0, on_click=lambda v: v + 1, label="◀ Prev",
+        )
+        for key in results
+    } | {
+        f"{key}__next": mo.ui.button(
+            value=0, on_click=lambda v: v + 1, label="Next ▶",
+        )
+        for key in results
+    })
+    return PAGE_SIZE, pager_buttons
+
+
+@app.cell
+def sections(PAGE_SIZE, mo, pager_buttons, results):
     # ── table rendering ──────────────────────────────────────────────────────
+    # Inline styles per <td>: with the per-tab page cap (10 rows) the total
+    # rendered HTML stays under a few hundred KB even on the dirty OCEL log.
+    # We avoid a single <style> block because marimo doesn't guarantee
+    # passing <style> tags through (see docs: "use mo.iframe for styles").
 
     bad_style   = "background-color:#fde2e2; color:#b00020; font-weight:600;"
     table_style = (
@@ -106,9 +133,21 @@ def sections(mo, results):
         value = row[col]
         return f'<td style="{style}">{"null" if value is None else value}</td>'
 
-    def _render(df, is_bad):
+    def _render(key, df, is_bad):
         if df.height == 0:
             return mo.md("_No violations found._")
+        n = df.height
+        max_page = max(0, (n - 1) // PAGE_SIZE)
+        prev_btn = pager_buttons[f"{key}__prev"]
+        next_btn = pager_buttons[f"{key}__next"]
+        # Page index derives from cumulative click counts; clamp to range so
+        # repeated Prev at page 0 (or Next at the end) is a no-op.
+        raw_page = (next_btn.value or 0) - (prev_btn.value or 0)
+        page = min(max(raw_page, 0), max_page)
+        start = page * PAGE_SIZE
+        stop = min(start + PAGE_SIZE, n)
+        slice_df = df.slice(start, stop - start)
+
         cols = df.columns
         head = "".join(f'<th style="{th_style}">{c}</th>' for c in cols)
         rows = "".join(
@@ -118,13 +157,22 @@ def sections(mo, results):
                 for c in cols
             )
             + "</tr>"
-            for i, row in enumerate(df.iter_rows(named=True))
+            for i, row in enumerate(slice_df.iter_rows(named=True))
         )
-        return mo.Html(
+        table = mo.Html(
             f'<table style="{table_style}">'
             f"<thead><tr>{head}</tr></thead>"
             f"<tbody>{rows}</tbody></table>"
         )
+        if n <= PAGE_SIZE:
+            return table
+        status = mo.Html(
+            f'<div style="font-size:12px; color:#57606a; padding:0 8px;">'
+            f"Page {page + 1} / {max_page + 1} &nbsp;·&nbsp; "
+            f"rows {start + 1:,}–{stop:,} of {n:,}</div>"
+        )
+        controls = mo.hstack([prev_btn, status, next_btn], justify="start", gap=0.5)
+        return mo.vstack([table, controls], gap=0.25)
 
     # ── highlight helpers ────────────────────────────────────────────────────
 
@@ -168,7 +216,7 @@ def sections(mo, results):
         pills = "".join(
             f'<span style="color:{MUTED}; font-size:13px; margin-right:14px;">'
             f'{label}&nbsp;{_badge(df.height)}</span>'
-            for label, df, _ in checks
+            for label, _key, df, _ in checks
         )
         heading = mo.Html(
             f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; '
@@ -178,26 +226,26 @@ def sections(mo, results):
             f'</div>'
         )
         tab_group = mo.ui.tabs(
-            {label: _render(df, fn) for label, df, fn in checks}
+            {label: _render(key, df, fn) for label, key, df, fn in checks}
         )
         return mo.vstack([heading, tab_group], gap=0)
 
     # ── three sections ───────────────────────────────────────────────────────
 
     attr_section = _section("Attributes", [
-        ("Missing values",   results["missing_attributes"],  _bad_col("actual_value")),
-        ("Wrong datatypes",  results["incorrect_datatypes"], _bad_col("actual_value")),
+        ("Missing values",   "missing_attributes",  results["missing_attributes"],  _bad_col("actual_value")),
+        ("Wrong datatypes",  "incorrect_datatypes", results["incorrect_datatypes"], _bad_col("actual_value")),
     ])
 
     obj_section = _section("Objects", [
-        ("Missing types",        results["missing_object_types"],        _bad_col("ocel_type")),
-        ("Duplicate IDs",        results["duplicate_object_ids"],        _bad_dup_id),
-        ("Duplicate attributes", results["duplicate_object_attributes"], _bad_dup_attrs),
+        ("Missing types",        "missing_object_types",        results["missing_object_types"],        _bad_col("ocel_type")),
+        ("Duplicate IDs",        "duplicate_object_ids",        results["duplicate_object_ids"],        _bad_dup_id),
+        ("Duplicate attributes", "duplicate_object_attributes", results["duplicate_object_attributes"], _bad_dup_attrs),
     ])
 
     rel_section = _section("Relationships", [
-        ("Object → Object", results["dangling_o2o_relations"], _bad_o2o),
-        ("Event → Object",  results["dangling_e2o_relations"], _bad_e2o),
+        ("Object → Object", "dangling_o2o_relations", results["dangling_o2o_relations"], _bad_o2o),
+        ("Event → Object",  "dangling_e2o_relations", results["dangling_e2o_relations"], _bad_e2o),
     ])
 
     mo.vstack([attr_section, obj_section, rel_section], gap=0)
