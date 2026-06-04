@@ -4,3 +4,4 @@
 __pycache__/
 .cache/
 *__marimo__
+*dev.ipynb
