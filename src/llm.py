@@ -85,9 +85,19 @@ def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
     ctx: dict[str, Any] = {"issue_key": issue_key, "violation": dict(row)}
     ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
 
-    # Pick the anchor object/event for this issue.
-    anchor_id = row.get("ocel_id") or row.get("ocel_object_id") or row.get("ocel_source_id")
-    anchor_type = row.get("object_type") or row.get("source_type")
+    # Pick the anchor object/event for this issue.  For dangling_o2o the anchor
+    # is the *known* side -- if the source is missing, the target is what we
+    # know about, and vice versa.
+    if issue_key == "dangling_o2o_relations":
+        if row.get("missing_side") == "source":
+            anchor_id = row.get("ocel_target_id")
+            anchor_type = row.get("target_type")
+        else:
+            anchor_id = row.get("ocel_source_id")
+            anchor_type = row.get("source_type")
+    else:
+        anchor_id = row.get("ocel_id") or row.get("ocel_object_id") or row.get("ocel_source_id")
+        anchor_type = row.get("object_type") or row.get("source_type")
 
     if anchor_id:
         # Attributes from the per-type table.
@@ -128,25 +138,33 @@ def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
             ).fetchall()
             ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
 
-    # Candidate id lists for dangling-relation issues.
+    # Candidate id lists for dangling-relation issues.  We attach `ocel_type`
+    # alongside each id so the LLM can filter candidates by plausibility
+    # instead of staring at 200 bare strings.
     if issue_key == "dangling_o2o_relations":
-        ctx["candidate_object_ids"] = [
-            r[0] for r in conn.execute(
-                "SELECT ocel_id FROM object WHERE ocel_id IS NOT NULL LIMIT 200"
+        ctx["candidate_objects"] = [
+            {"ocel_id": r[0], "ocel_type": r[1]}
+            for r in conn.execute(
+                "SELECT ocel_id, ocel_type FROM object "
+                "WHERE ocel_id IS NOT NULL LIMIT 200"
             ).fetchall()
         ]
     elif issue_key == "dangling_e2o_relations":
         side = row.get("missing_side")
         if side == "object":
-            ctx["candidate_object_ids"] = [
-                r[0] for r in conn.execute(
-                    "SELECT ocel_id FROM object WHERE ocel_id IS NOT NULL LIMIT 200"
+            ctx["candidate_objects"] = [
+                {"ocel_id": r[0], "ocel_type": r[1]}
+                for r in conn.execute(
+                    "SELECT ocel_id, ocel_type FROM object "
+                    "WHERE ocel_id IS NOT NULL LIMIT 200"
                 ).fetchall()
             ]
         else:
-            ctx["candidate_event_ids"] = [
-                r[0] for r in conn.execute(
-                    "SELECT ocel_id FROM event WHERE ocel_id IS NOT NULL LIMIT 200"
+            ctx["candidate_events"] = [
+                {"ocel_id": r[0], "ocel_type": r[1]}
+                for r in conn.execute(
+                    "SELECT ocel_id, ocel_type FROM event "
+                    "WHERE ocel_id IS NOT NULL LIMIT 200"
                 ).fetchall()
             ]
     # For duplicate issues: fetch full attribute rows for all duplicated IDs so
@@ -185,15 +203,46 @@ def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
 
 _TASKS = {
     "missing_object_types": (
-        "Infer the missing `ocel_type`. Pick exactly one value from "
-        "`candidate_types`, or null. Return JSON: "
+        "An object row in the `object` table has a NULL or empty `ocel_type`. "
+        "Infer the most likely type for this object.\n\n"
+        "Reasoning recipe:\n"
+        "  1. The object's id is in `violation.ocel_id`. Its existing attributes "
+        "(if any were stored in a per-type table under that id) are in "
+        "`object.attributes`.\n"
+        "  2. `events` lists up to 8 events touching this object together with "
+        "the qualifier under which the event references it. Activity names and "
+        "qualifiers (e.g. 'place_order' + 'customer' strongly imply Customer) "
+        "are the strongest signal.\n"
+        "  3. Pick exactly one value from `candidate_types` -- a verbatim "
+        "string, never a fabrication. If multiple candidates fit, pick the one "
+        "whose name best matches the activities/qualifiers seen.\n"
+        "  4. Return null only when no candidate is a plausible fit, and put "
+        "the specific reason in `rationale` (e.g. 'no events touch this "
+        "object and attribute set is empty -- no signal to disambiguate').\n\n"
+        "Return JSON: "
         '{"inferred_type": str|null, "rationale": str, "confidence": number}.'
     ),
     "missing_attributes": (
-        "Suggest a value for the missing attribute named in `violation.attribute_name`. "
-        "Use `peer_objects` to understand what typical values look like for this "
-        "attribute across objects of the same type. "
-        "Use event activities and other attributes of this object as additional evidence. "
+        "An object row has a missing (NULL or empty) value for the attribute "
+        "named in `violation.attribute` (or `violation.attribute_name`). "
+        "Infer the most likely value.\n\n"
+        "Reasoning recipe:\n"
+        "  1. `peer_objects` shows up to 5 other objects of the same type with "
+        "their full attribute rows -- use these to learn the typical shape, "
+        "format, and value distribution of the missing attribute.\n"
+        "  2. The anchor object's other (non-missing) attributes are in "
+        "`object.attributes`. They often correlate with the missing one "
+        "(e.g. country implies currency, product_id implies category).\n"
+        "  3. `events` lists activities touching this object; activity names "
+        "and qualifiers can pin down the value (e.g. activity 'pay_in_eur' "
+        "implies currency='EUR').\n"
+        "  4. Match the data type, units, and formatting of the peer values "
+        "exactly. Do not invent ids, codes, or names that are not supported "
+        "by the evidence.\n"
+        "  5. Return null only when peers and events together give no signal "
+        "for this attribute, and put the specific reason in `rationale` "
+        "(e.g. 'all peer values are distinct free-text and no event activity "
+        "narrows them').\n\n"
         "Return JSON: "
         '{"inferred_value": any|null, "rationale": str, "confidence": number}.'
     ),
@@ -227,28 +276,78 @@ _TASKS = {
         '{"coerced_value": any|null, "rationale": str, "confidence": number}.'
     ),
     "dangling_o2o_relations": (
-        "Pick the most likely missing referent from `candidate_object_ids`, or null. "
+        "An object_object relation references an object that does not exist in "
+        "the `object` table. Pick the most likely intended referent from "
+        "`candidate_objects` (each entry has `ocel_id` and `ocel_type`), or null "
+        "if no candidate is a plausible match.\n\n"
+        "Reasoning recipe:\n"
+        "  1. `violation.missing_side` tells you which end is missing "
+        "('source' or 'target').\n"
+        "  2. The known end is described in `object` (its ocel_id, type, and "
+        "attributes). Use its type and attributes plus `violation.ocel_qualifier` "
+        "to narrow candidates -- the qualifier names the relationship and often "
+        "implies a plausible target type (e.g. 'belongs_to', 'part_of', 'parent').\n"
+        "  3. Filter `candidate_objects` to those whose `ocel_type` is plausible "
+        "for that qualifier and the known end's type. Among the survivors, "
+        "prefer ids that share a naming prefix or convention with the known end.\n"
+        "  4. Return the single best `ocel_id` -- a verbatim value from "
+        "`candidate_objects`, never a fabrication. Return null only when no "
+        "candidate is plausible, and put the specific reason in `rationale`.\n\n"
         "Return JSON: "
         '{"inferred_referent": str|null, "rationale": str, "confidence": number}.'
     ),
     "dangling_e2o_relations": (
-        "Pick the most likely missing referent from the candidate id list "
-        "(`candidate_object_ids` if missing_side is 'object', else "
-        "`candidate_event_ids`), or null. Return JSON: "
+        "An event_object relation references an event or object that does not "
+        "exist. Pick the most likely intended referent from the candidate list "
+        "-- `candidate_objects` if `violation.missing_side` is 'object', "
+        "otherwise `candidate_events` -- or null. Use the known end's type, "
+        "attributes (in `object`), and `violation.ocel_qualifier` to narrow "
+        "candidates. Return a verbatim id from the list; never invent one. "
+        "Return null only when no candidate is plausible, and put the specific "
+        "reason in `rationale`.\n\n"
+        "Return JSON: "
         '{"inferred_referent": str|null, "rationale": str, "confidence": number}.'
     ),
     "duplicate_object_ids": (
-        "Multiple object rows share the same `ocel_ids` value (shown in "
-        "`duplicate_rows`). Decide which single `ocel_id` is canonical -- "
-        "prefer the one with a non-null `ocel_type` and the most associated events. "
+        "Multiple rows in the `object` table share the same `ocel_id`. The "
+        "duplicated rows are listed in `duplicate_rows` (each entry has "
+        "`ocel_id` and `ocel_type`). Decide which single row is canonical and "
+        "which should be deleted.\n\n"
+        "Reasoning recipe:\n"
+        "  1. Prefer rows with a non-null, non-empty `ocel_type`. A row with "
+        "an explicit type is almost always the canonical one.\n"
+        "  2. If multiple rows have a type, prefer the one whose type is "
+        "consistent with the activities in `events` (events touching this "
+        "ocel_id are listed under `events`).\n"
+        "  3. The canonical id itself is the shared value -- the choice is "
+        "really about which TYPE to keep. Set `canonical_id` to that ocel_id, "
+        "and list the duplicate rows that should be removed in "
+        "`ids_to_delete` using their (ocel_id, ocel_type) tuple style is fine "
+        "but a list of ocel_ids is what gets used by the suggested DELETE.\n"
+        "  4. Put the specific reason for your pick (and for any rejected "
+        "alternatives) in `rationale`. Never invent an ocel_id that is not "
+        "in `duplicate_rows`.\n\n"
         "Return JSON: "
         '{"canonical_id": str, "ids_to_delete": [str], "rationale": str, "confidence": number}.'
     ),
     "duplicate_object_attributes": (
-        "An object has duplicate values for the attribute named in "
-        "`violation.attribute_name` (duplicated values shown in "
-        "`duplicate_attribute_values`). Decide which single value is correct, "
-        "using `object_attributes` and event activities as evidence. "
+        "Two or more objects of the same type share an identical attribute "
+        "fingerprint but have different `ocel_id`s. The duplicated values "
+        "are listed in `duplicate_attribute_values`; the anchor object's "
+        "full attribute row is in `object_attributes`.\n\n"
+        "Reasoning recipe:\n"
+        "  1. Look at `violation.attribute_name` (or `violation.attribute`) "
+        "to know which column has the conflicting value.\n"
+        "  2. Compare the candidate values in `duplicate_attribute_values`. "
+        "Prefer the one that matches the formatting/casing/units of the "
+        "anchor object's other attributes in `object_attributes`.\n"
+        "  3. Use `events` (activities touching the anchor object) as a "
+        "tiebreaker -- e.g. an activity name often implies the correct "
+        "value (currency, country, category).\n"
+        "  4. Return null only when the candidate values are equally "
+        "plausible and no other attribute or event narrows them; put the "
+        "specific reason in `rationale`. Never invent a value that is not "
+        "in `duplicate_attribute_values`.\n\n"
         "Return JSON: "
         '{"canonical_value": any, "rationale": str, "confidence": number}.'
     ),
@@ -288,7 +387,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "missing_object_types":
         new = payload.get("inferred_type")
         if not new:
-            return noop("LLM declined to infer an object type.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM declined to infer an object type: {reason}")
         return {
             "kind": "update", "target_table": "object",
             "target_pk": {"ocel_id": row["ocel_id"]},
@@ -300,7 +400,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "missing_attributes":
         new = payload.get("inferred_value")
         if new is None:
-            return noop("LLM declined to infer a value.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM declined to infer a value: {reason}")
         # The detector stores the attribute name in "attribute_name", not "attribute".
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
@@ -333,7 +434,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "dangling_o2o_relations":
         new = payload.get("inferred_referent")
         if not new:
-            return noop("LLM declined to infer a referent.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM declined to infer a referent: {reason}")
         side = row.get("missing_side")
         if side == "source":
             return {
@@ -362,7 +464,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "dangling_e2o_relations":
         new = payload.get("inferred_referent")
         if not new:
-            return noop("LLM declined to infer a referent.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM declined to infer a referent: {reason}")
         side = row.get("missing_side")
         if side == "event":
             return {
@@ -392,7 +495,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
         canonical = payload.get("canonical_id")
         ids_to_delete = payload.get("ids_to_delete") or []
         if not canonical:
-            return noop("LLM could not determine a canonical object ID.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM could not determine a canonical object ID: {reason}")
         # We surface this as a special "deduplicate" action kind.
         # apply_repair handles "update" only, so we encode the intent as a
         # delete of the non-canonical rows via a synthetic action.  For now
@@ -417,7 +521,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "duplicate_object_attributes":
         canonical_val = payload.get("canonical_value")
         if canonical_val is None:
-            return noop("LLM could not determine a canonical attribute value.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM could not determine a canonical attribute value: {reason}")
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
             return noop("Could not determine attribute column name from violation row.")
