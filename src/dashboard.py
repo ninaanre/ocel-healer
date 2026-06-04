@@ -253,8 +253,25 @@ def expert_buttons(llm_enabled, mo):
     ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
     apply_dryrun_btn = mo.ui.run_button(label="Apply (dry-run)")
     apply_commit_btn = mo.ui.run_button(label="Apply (commit)", kind="danger")
-    mo.hstack([ask_btn, apply_dryrun_btn, apply_commit_btn], justify="start")
-    return apply_commit_btn, apply_dryrun_btn, ask_btn
+    override_dryrun_btn = mo.ui.run_button(label="Apply override (dry-run)")
+    override_commit_btn = mo.ui.run_button(label="Apply override (commit)", kind="danger")
+    mo.hstack(
+        [
+            ask_btn,
+            apply_dryrun_btn,
+            apply_commit_btn,
+            override_dryrun_btn,
+            override_commit_btn,
+        ],
+        justify="start",
+    )
+    return (
+        apply_commit_btn,
+        apply_dryrun_btn,
+        ask_btn,
+        override_commit_btn,
+        override_dryrun_btn,
+    )
 
 
 @app.cell
@@ -289,7 +306,33 @@ def expert_suggest(
             f"</div></div></div>"
         )
 
+    def _is_routable(action):
+        # An override can be applied iff the action carries a target_table +
+        # column + non-empty target_pk. Successful updates qualify; so do
+        # decline/suppressed noops that we annotated with a target.
+        return (
+            action.get("target_table")
+            and action.get("column")
+            and action.get("target_pk")
+        )
+
+    def _override_default(action):
+        proposed = action.get("proposed_value")
+        if proposed is None:
+            # Fall back to the LLM's new_value for plain `update` actions.
+            proposed = action.get("new_value")
+        if proposed is None:
+            return ""
+        # Pre-fill in JSON form so quotes/types are explicit -- the apply cell
+        # parses with json.loads first, then falls back to the raw string.
+        try:
+            import json as _json
+            return _json.dumps(proposed)
+        except (TypeError, ValueError):
+            return str(proposed)
+
     suggestion = None
+    override_input = None
     suggest_view = None
     if not llm_enabled:
         suggest_view = mo.md("_Enable Ollama to use the domain expert._")
@@ -302,11 +345,32 @@ def expert_suggest(
             _row = dict(_df.row(_idx, named=True))
             try:
                 suggestion = suggest_repair(detector.value, _row, sqlite_path)
-                suggest_view = _render(suggestion)
+                action_view = _render(suggestion)
+                if _is_routable(suggestion):
+                    override_input = mo.ui.text(
+                        value=_override_default(suggestion),
+                        label="Override value (JSON or raw text)",
+                        full_width=True,
+                    )
+                    suggest_view = mo.vstack(
+                        [
+                            action_view,
+                            mo.md(
+                                "_Edit the value below and click **Apply override**. "
+                                "JSON literals (`42`, `\"abc\"`, `null`) are parsed; anything "
+                                "else is treated as a raw string. Overrides are type-checked "
+                                "against the column's SQL affinity._"
+                            ),
+                            override_input,
+                        ],
+                        gap=0.5,
+                    )
+                else:
+                    suggest_view = action_view
             except Exception as e:
                 suggest_view = mo.md(f"❌ LLM call failed: `{e}`").callout(kind="danger")
     suggest_view
-    return (suggestion,)
+    return override_input, suggestion
 
 
 @app.cell
@@ -315,12 +379,36 @@ def expert_apply(
     apply_dryrun_btn,
     apply_repair,
     mo,
+    override_commit_btn,
+    override_dryrun_btn,
+    override_input,
     sqlite_path,
     suggestion,
 ):
+    import json as _json
+
+    def _parse_override(text: str):
+        # Try JSON first (so `42`, `"abc"`, `null`, `true` parse to typed
+        # values). On failure fall back to the raw string -- friendlier than
+        # forcing valid JSON for a plain text edit.
+        if text is None:
+            return None
+        stripped = text.strip()
+        if stripped == "":
+            return ""
+        try:
+            return _json.loads(stripped)
+        except (ValueError, TypeError):
+            return text
+
     apply_view = None
     if suggestion is None:
-        if apply_dryrun_btn.value or apply_commit_btn.value:
+        if (
+            apply_dryrun_btn.value
+            or apply_commit_btn.value
+            or override_dryrun_btn.value
+            or override_commit_btn.value
+        ):
             apply_view = mo.md("_Run the domain expert first._")
     elif apply_commit_btn.value:
         try:
@@ -334,6 +422,30 @@ def expert_apply(
             apply_view = mo.md(f"```sql\n{_msg}\n```").callout(kind="info")
         except Exception as e:
             apply_view = mo.md(f"❌ Render failed: `{e}`").callout(kind="danger")
+    elif override_commit_btn.value or override_dryrun_btn.value:
+        if override_input is None:
+            apply_view = mo.md(
+                "_This action has no routable target; override is not available._"
+            ).callout(kind="warn")
+        else:
+            _parsed = _parse_override(override_input.value)
+            _dry = override_dryrun_btn.value and not override_commit_btn.value
+            try:
+                _msg = apply_repair(
+                    sqlite_path, suggestion, dry_run=_dry, override_value=_parsed
+                )
+                _kind = "info" if _dry else "success"
+                _prefix = "" if _dry else "✅\n\n"
+                _suffix = (
+                    ""
+                    if _dry
+                    else "\n\nClick **Re-run detection** above to refresh the tables."
+                )
+                apply_view = mo.md(
+                    f"{_prefix}```sql\n{_msg}\n```{_suffix}"
+                ).callout(kind=_kind)
+            except Exception as e:
+                apply_view = mo.md(f"❌ Override failed: `{e}`").callout(kind="danger")
     apply_view
     return
 
