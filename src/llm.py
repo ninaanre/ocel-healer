@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import os
 import sqlite3
@@ -30,7 +28,7 @@ def ollama_ready() -> tuple[bool, list[str]]:
 
 
 SYSTEM_PROMPT = (
-    "You are a domain expert in object-centric process mining (OCEL2). "
+    "You are a domain expert for object-centric event data in the OCEL2.0 format. "
     "You receive one data-quality violation plus a small slice of local context "
     "(the affected object's attributes, the events touching it, neighbouring "
     "objects, and a few peers of the same type). Reason from attribute names, "
@@ -118,6 +116,18 @@ def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
             ).fetchall()
         ]
 
+        # For attribute-level issues: add peer objects of the same type so the
+        # LLM can reason about typical values.  Without these, the model has
+        # nothing to compare against and will decline.
+        if issue_key in ("missing_attributes", "incorrect_datatypes") and table and cols:
+            quoted = ", ".join(_quote(c) for c in cols)
+            peers = conn.execute(
+                f"SELECT {quoted} FROM {_quote(table)} "
+                f"WHERE ocel_id != ? LIMIT 5",
+                (anchor_id,),
+            ).fetchall()
+            ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
+
     # Candidate id lists for dangling-relation issues.
     if issue_key == "dangling_o2o_relations":
         ctx["candidate_object_ids"] = [
@@ -139,6 +149,36 @@ def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
                     "SELECT ocel_id FROM event WHERE ocel_id IS NOT NULL LIMIT 200"
                 ).fetchall()
             ]
+    # For duplicate issues: fetch full attribute rows for all duplicated IDs so
+    # the LLM can compare them and decide which to keep / how to merge.
+    elif issue_key == "duplicate_object_ids":
+        dup_ids = row.get("ocel_ids", "")
+        ids = [i.strip() for i in str(dup_ids).split(",") if i.strip()]
+        if ids:
+            placeholders = ", ".join("?" * len(ids))
+            rows = conn.execute(
+                f"SELECT ocel_id, ocel_type FROM object WHERE ocel_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            ctx["duplicate_rows"] = [{"ocel_id": r[0], "ocel_type": r[1]} for r in rows]
+    elif issue_key == "duplicate_object_attributes":
+        dup_vals = row.get("attribute_values", "")
+        ctx["duplicate_attribute_values"] = [
+            v.strip() for v in str(dup_vals).split(",") if v.strip()
+        ]
+        # Also provide the full attribute row for the anchor object.
+        anchor_type2 = row.get("object_type")
+        table2 = _table_for_type(conn, anchor_type2)
+        if table2:
+            cols2 = [c for c, _ in _column_info(conn, table2)]
+            if cols2 and anchor_id:
+                quoted2 = ", ".join(_quote(c) for c in cols2)
+                r2 = conn.execute(
+                    f"SELECT {quoted2} FROM {_quote(table2)} WHERE ocel_id = ? LIMIT 1",
+                    (anchor_id,),
+                ).fetchone()
+                if r2:
+                    ctx["object_attributes"] = dict(zip(cols2, r2))
 
     return ctx
 
@@ -150,13 +190,19 @@ _TASKS = {
         '{"inferred_type": str|null, "rationale": str, "confidence": number}.'
     ),
     "missing_attributes": (
-        "Suggest a value for the missing attribute named in `violation.attribute`. "
-        "Use peer values and event activities as evidence. Return JSON: "
+        "Suggest a value for the missing attribute named in `violation.attribute_name`. "
+        "Use `peer_objects` to understand what typical values look like for this "
+        "attribute across objects of the same type. "
+        "Use event activities and other attributes of this object as additional evidence. "
+        "Return JSON: "
         '{"inferred_value": any|null, "rationale": str, "confidence": number}.'
     ),
     "incorrect_datatypes": (
         "Coerce `violation.actual_value` to the SQL type in `violation.expected_type` "
-        "if a semantically meaningful coercion exists, else null. Return JSON: "
+        "if a semantically meaningful coercion exists (e.g. '42' -> 42, '3.14' -> 3.14, "
+        "'2024-01-01' -> a date string), else null. "
+        "Use `peer_objects` to see what correctly-typed values look like. "
+        "Return JSON: "
         '{"coerced_value": any|null, "rationale": str, "confidence": number}.'
     ),
     "dangling_o2o_relations": (
@@ -169,6 +215,21 @@ _TASKS = {
         "(`candidate_object_ids` if missing_side is 'object', else "
         "`candidate_event_ids`), or null. Return JSON: "
         '{"inferred_referent": str|null, "rationale": str, "confidence": number}.'
+    ),
+    "duplicate_object_ids": (
+        "Multiple object rows share the same `ocel_ids` value (shown in "
+        "`duplicate_rows`). Decide which single `ocel_id` is canonical -- "
+        "prefer the one with a non-null `ocel_type` and the most associated events. "
+        "Return JSON: "
+        '{"canonical_id": str, "ids_to_delete": [str], "rationale": str, "confidence": number}.'
+    ),
+    "duplicate_object_attributes": (
+        "An object has duplicate values for the attribute named in "
+        "`violation.attribute_name` (duplicated values shown in "
+        "`duplicate_attribute_values`). Decide which single value is correct, "
+        "using `object_attributes` and event activities as evidence. "
+        "Return JSON: "
+        '{"canonical_value": any, "rationale": str, "confidence": number}.'
     ),
 }
 
@@ -204,6 +265,10 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
         new = payload.get("inferred_value")
         if new is None:
             return noop("LLM declined to infer a value.")
+        # The detector stores the attribute name in "attribute_name", not "attribute".
+        attr_col = row.get("attribute_name") or row.get("attribute")
+        if not attr_col:
+            return noop("Could not determine attribute column name from violation row.")
         return {
             "kind": "update", "target_table": f"object_{row['object_type']}",
             "target_pk": {"ocel_id": row["ocel_id"]},
@@ -216,6 +281,10 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
         new = payload.get("coerced_value")
         if new is None:
             return noop("LLM declined to coerce the value.")
+        # Same fix: attribute column name may be "attribute_name".
+        attr_col = row.get("attribute_name") or row.get("attribute")
+        if not attr_col:
+            return noop("Could not determine attribute column name from violation row.")
         return {
             "kind": "update", "target_table": f"object_{row['object_type']}",
             "target_pk": {"ocel_id": row["ocel_id"]},
@@ -281,6 +350,55 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
                 "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
             }
         return noop("Both ends of the E2O relation missing; cannot patch.")
+
+    if issue_key == "duplicate_object_ids":
+        canonical = payload.get("canonical_id")
+        ids_to_delete = payload.get("ids_to_delete") or []
+        if not canonical:
+            return noop("LLM could not determine a canonical object ID.")
+        # We surface this as a special "deduplicate" action kind.
+        # apply_repair handles "update" only, so we encode the intent as a
+        # delete of the non-canonical rows via a synthetic action.  For now
+        # we return an informational noop with the recommendation embedded in
+        # the rationale so the user can act on it manually via the dry-run SQL.
+        ids_str = ", ".join(repr(i) for i in ids_to_delete)
+        return {
+            "kind": "noop",
+            "target_table": "object",
+            "target_pk": {},
+            "column": None,
+            "old_value": None,
+            "new_value": None,
+            "rationale": (
+                f"{rationale}  |  Canonical ID: {canonical!r}.  "
+                f"Suggested DELETE: DELETE FROM object WHERE ocel_id IN ({ids_str})."
+            ),
+            "confidence": confidence,
+            "issue_key": issue_key,
+        }
+ 
+    if issue_key == "duplicate_object_attributes":
+        canonical_val = payload.get("canonical_value")
+        if canonical_val is None:
+            return noop("LLM could not determine a canonical attribute value.")
+        attr_col = row.get("attribute_name") or row.get("attribute")
+        if not attr_col:
+            return noop("Could not determine attribute column name from violation row.")
+        anchor_id = row.get("ocel_id") or row.get("ocel_object_id")
+        object_type = row.get("object_type")
+        if not anchor_id or not object_type:
+            return noop("Missing ocel_id or object_type in violation row.")
+        return {
+            "kind": "update",
+            "target_table": f"object_{object_type}",
+            "target_pk": {"ocel_id": anchor_id},
+            "column": attr_col,
+            "old_value": row.get("attribute_values"),
+            "new_value": canonical_val,
+            "rationale": rationale,
+            "confidence": confidence,
+            "issue_key": issue_key,
+        }
 
     return noop(f"No repair mapping for issue_key {issue_key!r}.")
 
