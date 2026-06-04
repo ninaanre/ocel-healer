@@ -80,6 +80,90 @@ def _table_for_type(conn: sqlite3.Connection, ocel_type: str | None) -> str | No
     return None
 
 
+def _column_affinity(conn: sqlite3.Connection, table: str, column: str) -> str:
+    """Look up the declared SQLite affinity for `table.column`, or '' if unknown."""
+    for _, name, dtype, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall():
+        if name == column:
+            return (dtype or "").upper()
+    return ""
+
+
+def _coerce_for_affinity(raw: Any, affinity: str) -> Any:
+    """Coerce `raw` to a value compatible with `affinity` (a SQLite column type
+    string like 'INTEGER', 'REAL', 'TEXT'). Mirrors the buckets used by
+    `_value_matches_type` so the apply path agrees with the detector.
+
+    Raises ValueError when no meaning-preserving coercion exists.
+    """
+    if raw is None:
+        return None
+    t = (affinity or "").upper()
+
+    # No declared affinity -> accept the value as-is (BLOB-affinity column).
+    if not t:
+        return raw
+
+    if "INT" in t:
+        if isinstance(raw, bool):
+            return int(raw)
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, float) and raw.is_integer():
+            return int(raw)
+        if isinstance(raw, str):
+            s = raw.strip()
+            try:
+                return int(s)
+            except ValueError:
+                # Tolerate "42.0" -> 42 but not "3.14".
+                try:
+                    f = float(s)
+                except ValueError:
+                    raise ValueError(f"override {raw!r} is not compatible with INTEGER affinity")
+                if f.is_integer():
+                    return int(f)
+                raise ValueError(f"override {raw!r} is not an integer ({affinity})")
+        raise ValueError(f"override {raw!r} is not compatible with INTEGER affinity")
+
+    if any(k in t for k in ("REAL", "FLOA", "DOUB", "NUMERIC", "DECIMAL")):
+        if isinstance(raw, bool):
+            return float(int(raw))
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            try:
+                return float(raw.strip())
+            except ValueError:
+                raise ValueError(f"override {raw!r} is not compatible with {affinity} affinity")
+        raise ValueError(f"override {raw!r} is not compatible with {affinity} affinity")
+
+    if any(k in t for k in ("CHAR", "TEXT", "CLOB")):
+        if isinstance(raw, str):
+            return raw
+        # Allow simple stringifications -- numbers, bools.
+        if isinstance(raw, (int, float, bool)):
+            return str(raw)
+        raise ValueError(f"override {raw!r} is not compatible with {affinity} affinity")
+
+    if "BLOB" in t:
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        if isinstance(raw, str):
+            return raw.encode("utf-8")
+        raise ValueError(f"override {raw!r} is not compatible with BLOB affinity")
+
+    # Unknown affinity -> pass through.
+    return raw
+
+
+def _value_for_column(conn: sqlite3.Connection, table: str, column: str, raw: Any) -> Any:
+    """Return `raw` coerced to a value compatible with `table.column`'s affinity,
+    or raise ValueError with a clear message. Used by apply_repair for both
+    LLM- and user-supplied values."""
+    affinity = _column_affinity(conn, table, column)
+    return _coerce_for_affinity(raw, affinity)
+
+
 def _build_context(conn: sqlite3.Connection, issue_key: str, row: dict) -> dict:
     """Assemble the JSON context block sent in the user prompt."""
     ctx: dict[str, Any] = {"issue_key": issue_key, "violation": dict(row)}
@@ -354,54 +438,187 @@ _TASKS = {
 }
 
 
+def _suppressed_target(issue_key: str, row: dict) -> dict:
+    """Return {target_table, target_pk, column, old_value} for a noop that was
+    suppressed by the confidence gate, so the override UI can still route it.
+    Returns empty fields when the issue type has no clean override target
+    (currently `duplicate_object_ids`)."""
+    empty = {"target_table": "", "target_pk": {}, "column": None, "old_value": None}
+
+    if issue_key == "missing_object_types":
+        return {
+            "target_table": "object",
+            "target_pk": {"ocel_id": row.get("ocel_id")},
+            "column": "ocel_type",
+            "old_value": row.get("ocel_type"),
+        }
+
+    if issue_key in ("missing_attributes", "incorrect_datatypes"):
+        attr_col = row.get("attribute_name") or row.get("attribute")
+        object_type = row.get("object_type")
+        if not attr_col or not object_type:
+            return empty
+        return {
+            "target_table": f"object_{object_type}",
+            "target_pk": {"ocel_id": row.get("ocel_id")},
+            "column": attr_col,
+            "old_value": row.get("actual_value"),
+        }
+
+    if issue_key == "dangling_o2o_relations":
+        side = row.get("missing_side")
+        if side == "source":
+            return {
+                "target_table": "object_object",
+                "target_pk": {
+                    "ocel_target_id": row.get("ocel_target_id"),
+                    "ocel_qualifier": row.get("ocel_qualifier"),
+                },
+                "column": "ocel_source_id",
+                "old_value": row.get("ocel_source_id"),
+            }
+        if side == "target":
+            return {
+                "target_table": "object_object",
+                "target_pk": {
+                    "ocel_source_id": row.get("ocel_source_id"),
+                    "ocel_qualifier": row.get("ocel_qualifier"),
+                },
+                "column": "ocel_target_id",
+                "old_value": row.get("ocel_target_id"),
+            }
+        return empty
+
+    if issue_key == "dangling_e2o_relations":
+        side = row.get("missing_side")
+        if side == "event":
+            return {
+                "target_table": "event_object",
+                "target_pk": {
+                    "ocel_object_id": row.get("ocel_object_id"),
+                    "ocel_qualifier": row.get("ocel_qualifier"),
+                },
+                "column": "ocel_event_id",
+                "old_value": row.get("ocel_event_id"),
+            }
+        if side == "object":
+            return {
+                "target_table": "event_object",
+                "target_pk": {
+                    "ocel_event_id": row.get("ocel_event_id"),
+                    "ocel_qualifier": row.get("ocel_qualifier"),
+                },
+                "column": "ocel_object_id",
+                "old_value": row.get("ocel_object_id"),
+            }
+        return empty
+
+    if issue_key == "duplicate_object_attributes":
+        attr_col = row.get("attribute_name") or row.get("attribute")
+        anchor_id = row.get("ocel_id") or row.get("ocel_object_id")
+        object_type = row.get("object_type")
+        if not attr_col or not anchor_id or not object_type:
+            return empty
+        return {
+            "target_table": f"object_{object_type}",
+            "target_pk": {"ocel_id": anchor_id},
+            "column": attr_col,
+            "old_value": row.get("attribute_values"),
+        }
+
+    # duplicate_object_ids has no single-column override target.
+    return empty
+
+
 def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     """Translate the LLM JSON payload into an action dict, or a noop."""
     confidence = float(payload.get("confidence", 0.0))
     rationale = str(payload.get("rationale", ""))
 
-    def noop(reason: str) -> dict:
+    def noop(reason: str, proposed: Any = None) -> dict:
         return {
             "kind": "noop", "target_table": "", "target_pk": {}, "column": None,
             "old_value": None, "new_value": None,
             "rationale": reason, "confidence": confidence, "issue_key": issue_key,
+            "proposed_value": proposed,
         }
+
+    # Pull the model's suggested value (whichever payload key carries it for
+    # this issue) up front -- both the confidence-gate noop and the per-issue
+    # decline branches surface it on the action so the override UI can default
+    # to it without re-parsing the rationale string.
+    proposed_keys = (
+        "coerced_value", "inferred_value", "inferred_type",
+        "inferred_referent", "canonical_id", "canonical_value",
+    )
+    proposed_value = next(
+        (payload[k] for k in proposed_keys if payload.get(k) is not None),
+        None,
+    )
 
     if confidence < MIN_CONFIDENCE:
         # Surface the model's would-be answer + its own rationale so the user can
         # see why the suggestion was suppressed (vs a flat threshold message).
-        proposed_keys = (
-            "coerced_value", "inferred_value", "inferred_type",
-            "inferred_referent", "canonical_id", "canonical_value",
-        )
-        proposed = next(
-            (payload[k] for k in proposed_keys if payload.get(k) is not None),
-            None,
-        )
         bits = [f"Confidence {confidence:.2f} below threshold {MIN_CONFIDENCE:.2f}."]
-        if proposed is not None:
-            bits.append(f"Would have proposed: {proposed!r}.")
+        if proposed_value is not None:
+            bits.append(f"Would have proposed: {proposed_value!r}.")
         if rationale.strip():
             bits.append(f"Rationale: {rationale.strip()}")
-        return noop(" ".join(bits))
+        # Reconstruct the noop so the dashboard can route an override -- we
+        # need target_table + column populated where they're known, otherwise
+        # the override field stays hidden.
+        suppressed = _suppressed_target(issue_key, row)
+        return {
+            "kind": "noop",
+            "target_table": suppressed["target_table"],
+            "target_pk": suppressed["target_pk"],
+            "column": suppressed["column"],
+            "old_value": suppressed["old_value"],
+            "new_value": None,
+            "rationale": " ".join(bits),
+            "confidence": confidence,
+            "issue_key": issue_key,
+            "proposed_value": proposed_value,
+        }
+
+    # Per-issue declines re-use _suppressed_target to attach a routable target
+    # (when there is one) so the override UI can still patch the row even when
+    # the LLM said null. `proposed_value` stays None here because the LLM
+    # didn't actually propose anything.
+    def routable_decline(reason: str) -> dict:
+        target = _suppressed_target(issue_key, row)
+        return {
+            "kind": "noop",
+            "target_table": target["target_table"],
+            "target_pk": target["target_pk"],
+            "column": target["column"],
+            "old_value": target["old_value"],
+            "new_value": None,
+            "rationale": reason,
+            "confidence": confidence,
+            "issue_key": issue_key,
+            "proposed_value": None,
+        }
 
     if issue_key == "missing_object_types":
         new = payload.get("inferred_type")
         if not new:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM declined to infer an object type: {reason}")
+            return routable_decline(f"LLM declined to infer an object type: {reason}")
         return {
             "kind": "update", "target_table": "object",
             "target_pk": {"ocel_id": row["ocel_id"]},
             "column": "ocel_type",
             "old_value": row.get("ocel_type"), "new_value": new,
             "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+            "proposed_value": new,
         }
 
     if issue_key == "missing_attributes":
         new = payload.get("inferred_value")
         if new is None:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM declined to infer a value: {reason}")
+            return routable_decline(f"LLM declined to infer a value: {reason}")
         # The detector stores the attribute name in "attribute_name", not "attribute".
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
@@ -412,13 +629,14 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
             "column": row["attribute"],
             "old_value": row.get("actual_value"), "new_value": new,
             "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+            "proposed_value": new,
         }
 
     if issue_key == "incorrect_datatypes":
         new = payload.get("coerced_value")
         if new is None:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM declined to coerce: {reason}")
+            return routable_decline(f"LLM declined to coerce: {reason}")
         # Same fix: attribute column name may be "attribute_name".
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
@@ -429,13 +647,14 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
             "column": row["attribute"],
             "old_value": row.get("actual_value"), "new_value": new,
             "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+            "proposed_value": new,
         }
 
     if issue_key == "dangling_o2o_relations":
         new = payload.get("inferred_referent")
         if not new:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM declined to infer a referent: {reason}")
+            return routable_decline(f"LLM declined to infer a referent: {reason}")
         side = row.get("missing_side")
         if side == "source":
             return {
@@ -447,6 +666,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
                 "column": "ocel_source_id",
                 "old_value": row.get("ocel_source_id"), "new_value": new,
                 "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+                "proposed_value": new,
             }
         if side == "target":
             return {
@@ -458,6 +678,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
                 "column": "ocel_target_id",
                 "old_value": row.get("ocel_target_id"), "new_value": new,
                 "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+                "proposed_value": new,
             }
         return noop("Both ends of the O2O relation missing; cannot patch.")
 
@@ -465,7 +686,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
         new = payload.get("inferred_referent")
         if not new:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM declined to infer a referent: {reason}")
+            return routable_decline(f"LLM declined to infer a referent: {reason}")
         side = row.get("missing_side")
         if side == "event":
             return {
@@ -477,6 +698,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
                 "column": "ocel_event_id",
                 "old_value": row.get("ocel_event_id"), "new_value": new,
                 "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+                "proposed_value": new,
             }
         if side == "object":
             return {
@@ -488,6 +710,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
                 "column": "ocel_object_id",
                 "old_value": row.get("ocel_object_id"), "new_value": new,
                 "rationale": rationale, "confidence": confidence, "issue_key": issue_key,
+                "proposed_value": new,
             }
         return noop("Both ends of the E2O relation missing; cannot patch.")
 
@@ -516,13 +739,14 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
             ),
             "confidence": confidence,
             "issue_key": issue_key,
+            "proposed_value": canonical,
         }
- 
+
     if issue_key == "duplicate_object_attributes":
         canonical_val = payload.get("canonical_value")
         if canonical_val is None:
             reason = rationale.strip() or "no reason provided"
-            return noop(f"LLM could not determine a canonical attribute value: {reason}")
+            return routable_decline(f"LLM could not determine a canonical attribute value: {reason}")
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
             return noop("Could not determine attribute column name from violation row.")
@@ -540,6 +764,7 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
             "rationale": rationale,
             "confidence": confidence,
             "issue_key": issue_key,
+            "proposed_value": canonical_val,
         }
 
     return noop(f"No repair mapping for issue_key {issue_key!r}.")
@@ -566,11 +791,35 @@ def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
     return _to_action(issue_key, row, payload)
 
 
-def apply_repair(sqlite_path: str, action: dict, *, dry_run: bool = True) -> str:
-    """Execute (or dry-run) an action dict. Validates table/column names against the schema."""
+_OVERRIDE_UNSET = object()
+
+
+def apply_repair(
+    sqlite_path: str,
+    action: dict,
+    *,
+    dry_run: bool = True,
+    override_value: Any = _OVERRIDE_UNSET,
+) -> str:
+    """Execute (or dry-run) an action dict. Validates table/column names against the schema.
+
+    When `override_value` is provided, it replaces the action's `new_value`
+    (after a type-affinity coercion check) and the rationale is stamped with
+    a USER OVERRIDE prefix. An override can also rescue a noop -- as long as
+    the noop carries a routable target_table + column + target_pk.
+    """
+    has_override = override_value is not _OVERRIDE_UNSET
+
     if action["kind"] == "noop":
-        raise ValueError(f"Refusing to apply noop: {action['rationale']}")
-    if action["kind"] != "update":
+        if not has_override:
+            raise ValueError(f"Refusing to apply noop: {action['rationale']}")
+        # Override-on-noop: require a routable target.
+        if not action.get("target_table") or not action.get("column") or not action.get("target_pk"):
+            raise ValueError(
+                "Override cannot be applied: this noop has no routable target "
+                "(missing target_table, column, or target_pk)."
+            )
+    elif action["kind"] != "update":
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
     with _connect(sqlite_path) as conn:
@@ -589,11 +838,27 @@ def apply_repair(sqlite_path: str, action: dict, *, dry_run: bool = True) -> str
         if bad_pk:
             raise ValueError(f"Refusing to repair: target_pk uses unknown column(s) {bad_pk!r}.")
 
+        # Resolve the value to write. Overrides go through a type-affinity
+        # check so we don't silently re-introduce an `incorrect_datatypes`
+        # violation via the fix path.
+        if has_override:
+            new_value = _value_for_column(conn, table, col, override_value)
+            llm_rationale = action.get("rationale", "") or "<no LLM rationale>"
+            effective_rationale = (
+                f"USER OVERRIDE: {override_value!r}. LLM said: {llm_rationale}"
+            )
+        else:
+            new_value = action["new_value"]
+            effective_rationale = action.get("rationale", "")
+
         where = " AND ".join(f"{_quote(c)} = ?" for c in action["target_pk"])
         sql = f'UPDATE {_quote(table)} SET {_quote(col)} = ? WHERE {where}'
-        params = (action["new_value"], *action["target_pk"].values())
+        params = (new_value, *action["target_pk"].values())
 
-        rendered = f"{sql}\n  with params = {params!r}"
+        header = ""
+        if has_override:
+            header = f"-- {effective_rationale}\n"
+        rendered = f"{header}{sql}\n  with params = {params!r}"
         if dry_run:
             return f"-- DRY RUN (no changes written)\n{rendered}"
         with conn:
