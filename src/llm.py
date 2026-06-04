@@ -198,10 +198,31 @@ _TASKS = {
         '{"inferred_value": any|null, "rationale": str, "confidence": number}.'
     ),
     "incorrect_datatypes": (
-        "Coerce `violation.actual_value` to the SQL type in `violation.expected_type` "
-        "if a semantically meaningful coercion exists (e.g. '42' -> 42, '3.14' -> 3.14, "
-        "'2024-01-01' -> a date string), else null. "
-        "Use `peer_objects` to see what correctly-typed values look like. "
+        "Coerce `violation.actual_value` so that it matches the SQL affinity in "
+        "`violation.expected_type`.\n\n"
+        "IMPORTANT: `violation.actual_value` is a Python `repr()` of the original "
+        "cell. A wrapping pair of single quotes means the cell currently holds a "
+        "string -- strip those quotes before reasoning about the underlying value. "
+        "`violation.actual_python_type` tells you the current Python type.\n\n"
+        "SQL affinity -> target Python type:\n"
+        "  INTEGER                         -> int\n"
+        "  REAL / FLOA / DOUB / NUMERIC /  -> float\n"
+        "    DECIMAL\n"
+        "  TEXT / CHAR / CLOB              -> str\n"
+        "  BLOB                            -> bytes\n\n"
+        "Worked examples (actual_value, expected_type) -> coerced_value:\n"
+        "  ('42', INTEGER)         -> 42\n"
+        "  ('3.14', REAL)          -> 3.14\n"
+        "  ('true', INTEGER)       -> 1\n"
+        "  ('false', INTEGER)      -> 0\n"
+        "  (42, TEXT)              -> \"42\"\n"
+        "  ('2024-01-01', TEXT)    -> \"2024-01-01\"\n"
+        "  ('banana', INTEGER)     -> null   # no meaning-preserving coercion\n\n"
+        "Prefer a coercion whenever one preserves the value's meaning, even at "
+        "modest confidence. Use `peer_objects` to confirm what correctly-typed "
+        "values look like for this attribute. Return null ONLY when no coercion "
+        "preserves the meaning -- and in that case, set `rationale` to the "
+        "specific reason coercion is impossible.\n\n"
         "Return JSON: "
         '{"coerced_value": any|null, "rationale": str, "confidence": number}.'
     ),
@@ -247,7 +268,22 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
         }
 
     if confidence < MIN_CONFIDENCE:
-        return noop(f"Confidence {confidence:.2f} below threshold {MIN_CONFIDENCE:.2f}.")
+        # Surface the model's would-be answer + its own rationale so the user can
+        # see why the suggestion was suppressed (vs a flat threshold message).
+        proposed_keys = (
+            "coerced_value", "inferred_value", "inferred_type",
+            "inferred_referent", "canonical_id", "canonical_value",
+        )
+        proposed = next(
+            (payload[k] for k in proposed_keys if payload.get(k) is not None),
+            None,
+        )
+        bits = [f"Confidence {confidence:.2f} below threshold {MIN_CONFIDENCE:.2f}."]
+        if proposed is not None:
+            bits.append(f"Would have proposed: {proposed!r}.")
+        if rationale.strip():
+            bits.append(f"Rationale: {rationale.strip()}")
+        return noop(" ".join(bits))
 
     if issue_key == "missing_object_types":
         new = payload.get("inferred_type")
@@ -280,7 +316,8 @@ def _to_action(issue_key: str, row: dict, payload: dict) -> dict:
     if issue_key == "incorrect_datatypes":
         new = payload.get("coerced_value")
         if new is None:
-            return noop("LLM declined to coerce the value.")
+            reason = rationale.strip() or "no reason provided"
+            return noop(f"LLM declined to coerce: {reason}")
         # Same fix: attribute column name may be "attribute_name".
         attr_col = row.get("attribute_name") or row.get("attribute")
         if not attr_col:
