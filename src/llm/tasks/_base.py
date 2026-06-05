@@ -1,5 +1,3 @@
-# TODO: refine & fix this file!
-
 import sqlite3
 import textwrap
 from abc import ABC, abstractmethod
@@ -12,8 +10,11 @@ if TYPE_CHECKING:
     from src.llm.actions import ActionResult
 
 
+REGISTRY: dict[str, "IssueTask"] = {}
+
+
 class IssueTask(ABC):
-    """Base class for one repair task per OCEL2 issue type.
+    """Base class for one repair task per issue type.
 
     Subclasses set `issue_key` and `PROMPT`, implement `parse_payload`, and
     optionally override `extend_context`, `anchor`, and `suppressed_target`.
@@ -26,8 +27,6 @@ class IssueTask(ABC):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if getattr(cls, "issue_key", ""):
-            # Lazy import avoids a circular dependency with tasks/__init__.py.
-            from src.llm.tasks import REGISTRY
             REGISTRY[cls.issue_key] = cls()
 
     @property
