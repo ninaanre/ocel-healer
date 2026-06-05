@@ -4,25 +4,47 @@ from src.llm.sql_utils import quote, table_for_type
 from src.llm.tasks._base import IssueTask
 
 
-class DuplicateObjectAttributes(IssueTask):
-    issue_key = "duplicate_object_attributes"
+class DuplicateObjectsOnAttributes(IssueTask):
+    issue_key = "duplicate_objects_on_attributes"
 
     PROMPT = """\
-        Two or more objects of the same type share an identical attribute fingerprint but
-        have different `ocel_id`s. The duplicated values are listed in `duplicate_attribute_values`;
-        the anchor object's full attribute row is in `object_attributes`.
+        <task>
+        Two or more objects of the same type share an identical attribute
+        fingerprint but have different `ocel_id`s. Pick the canonical value for
+        the conflicting attribute on the anchor object.
+        </task>
 
-        Reasoning recipe:
-          1. Look at `violation.attribute_name` (or `violation.attribute`) to know which column has the conflicting value.
-          2. Compare the candidate values in `duplicate_attribute_values`. Prefer the one that
-            matches the formatting/casing/units of the anchor object's other attributes in `object_attributes`.
-          3. Use `events` (activities touching the anchor object) as a tiebreaker -- e.g. an
-            activity name often implies the correct value (currency, country, category).
-          4. Return null only when the candidate values are equally plausible and no other
-            attribute or event narrows them; put the specific reason in `rationale`. Never invent a value
-            that is not in `duplicate_attribute_values`.
+        <inputs>
+          - violation.attribute_name      the column whose value is in conflict
+                                          (older rows may carry it as `attribute`)
+          - duplicate_attribute_values    the candidate values to choose from
+          - object_attributes             the anchor's full attribute row (use
+                                          its other columns for formatting/casing/units cues)
+          - events                        up to 8 events touching the anchor; their
+                                          activities and qualifiers act as a tiebreaker
+        </inputs>
 
-        Return JSON: {"canonical_value": any, "rationale": str, "confidence": number}.
+        <method>
+          1. Compare the candidates in `duplicate_attribute_values`. Prefer the
+             one whose formatting, casing, and units match the anchor's other
+             attributes in `object_attributes`.
+          2. Use `events` activity names and qualifiers as a tiebreaker — an
+             activity often implies the correct value (e.g. 'pay_in_eur'
+             implies 'EUR' for a currency column).
+          3. The chosen value must be one of `duplicate_attribute_values` verbatim.
+        </method>
+
+        <example>
+          violation.attribute_name='currency'
+          duplicate_attribute_values=['EUR', 'USD']
+          object_attributes={country:'DE', amount:'100.00'}
+          events=[{activity:'pay_in_eur'}]
+          → {"canonical_value": "EUR", "rationale": "country='DE' and activity 'pay_in_eur' both point to EUR over USD", "confidence": 0.9}
+        </example>
+
+        <output>
+        JSON: {"canonical_value": any, "rationale": str, "confidence": number}
+        </output>
     """
 
     def extend_context(self, conn, ctx: dict, row: dict) -> None:

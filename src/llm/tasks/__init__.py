@@ -9,13 +9,13 @@ def get_task(issue_key: str) -> IssueTask | None:
 
 
 from src.llm.tasks import (
-    missing_object_types,
-    missing_attributes,
-    incorrect_datatypes,
-    dangling_o2o_relations,
-    dangling_e2o_relations,
-    duplicate_object_ids,
-    duplicate_object_attributes,
+    missing_object_type,
+    missing_attribute_value,
+    wrong_attribute_datatype,
+    dangling_o2o_relationship,
+    dangling_e2o_relationship,
+    duplicate_objects_on_ids,
+    duplicate_objects_on_attributes,
 )
 
 
