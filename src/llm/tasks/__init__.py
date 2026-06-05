@@ -1,7 +1,4 @@
-from src.llm.tasks._base import IssueTask 
-
-
-REGISTRY: dict[str, IssueTask] = {}
+from src.llm.tasks._base import REGISTRY, IssueTask
 
 
 def get_task(issue_key: str) -> IssueTask | None:
