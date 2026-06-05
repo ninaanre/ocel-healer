@@ -18,7 +18,7 @@ class ActionResult:
       "update"   -- proposed concrete value; all fields populated.
       "decline"  -- LLM said null; orchestrator attaches a routable target
                     (via task.suppressed_target) so override still works.
-      "unrouted" -- no clean override target (e.g. duplicate_object_ids).
+      "unrouted" -- no clean override target (e.g. duplicate_objects_on_ids).
     """
     kind: str
     target_table: str = ""
@@ -191,7 +191,7 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
 
 # --- Type-affinity coercion (for the apply path) --------------------------
 # Used only by apply_repair when the user supplies an override; ensures we
-# don't silently re-introduce an `incorrect_datatypes` violation via the
+# don't silently re-introduce a `wrong_attribute_datatype` violation via the
 # fix path. Mirrors the buckets used by the detector's _value_matches_type.
 
 def _column_affinity(conn: sqlite3.Connection, table: str, column: str) -> str:
