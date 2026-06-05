@@ -100,8 +100,8 @@ class IssueTask(ABC):
 
     def _attach_peers(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
         """Attach `peer_objects`: up to 5 other rows of the same type, full
-        attribute rows. Used by missing_attributes / incorrect_datatypes so
-        the LLM can learn typical value shape/format."""
+        attribute rows. Used by missing_attribute_value / wrong_attribute_datatype
+        so the LLM can learn typical value shape/format."""
         anchor_id, anchor_type = self.anchor(row)
         if not anchor_id:
             return

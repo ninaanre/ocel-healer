@@ -233,19 +233,19 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
     # ── three sections ───────────────────────────────────────────────────────
 
     attr_section = _section("Attributes", [
-        ("Missing values",   "missing_attributes",  results["missing_attributes"],  _bad_col("actual_value")),
-        ("Wrong datatypes",  "incorrect_datatypes", results["incorrect_datatypes"], _bad_col("actual_value")),
+        ("Missing values",   "missing_attribute_value",   results["missing_attribute_value"],   _bad_col("actual_value")),
+        ("Wrong datatypes",  "wrong_attribute_datatype",  results["wrong_attribute_datatype"],  _bad_col("actual_value")),
     ])
 
     obj_section = _section("Objects", [
-        ("Missing types",        "missing_object_types",        results["missing_object_types"],        _bad_col("ocel_type")),
-        ("Duplicate IDs",        "duplicate_object_ids",        results["duplicate_object_ids"],        _bad_dup_id),
-        ("Duplicate attributes", "duplicate_object_attributes", results["duplicate_object_attributes"], _bad_dup_attrs),
+        ("Missing types",        "missing_object_type",              results["missing_object_type"],              _bad_col("ocel_type")),
+        ("Duplicate IDs",        "duplicate_objects_on_ids",         results["duplicate_objects_on_ids"],         _bad_dup_id),
+        ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
     ])
 
     rel_section = _section("Relationships", [
-        ("Object → Object", "dangling_o2o_relations", results["dangling_o2o_relations"], _bad_o2o),
-        ("Event → Object",  "dangling_e2o_relations", results["dangling_e2o_relations"], _bad_e2o),
+        ("Object → Object", "dangling_o2o_relationship", results["dangling_o2o_relationship"], _bad_o2o),
+        ("Event → Object",  "dangling_e2o_relationship", results["dangling_e2o_relationship"], _bad_e2o),
     ])
 
     mo.vstack([attr_section, obj_section, rel_section], gap=0)
