@@ -1,2 +1,7 @@
 .venv
 .vscode
+*.egg-info/
+__pycache__/
+.cache/
+*__marimo__
+*dev.ipynb
