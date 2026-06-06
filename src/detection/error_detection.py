@@ -85,7 +85,7 @@ def _iter_object_attrs(
                 yield ocel_type, ocel_id, attr, declared, value
 
 
-def detect_missing_attributes(src: SqliteInput) -> pl.DataFrame:
+def detect_missing_attribute_value(src: SqliteInput) -> pl.DataFrame:
     """Find object rows where any attribute value is NULL or empty/whitespace."""
     with _connect(src) as conn:
         rows = [
@@ -94,7 +94,7 @@ def detect_missing_attributes(src: SqliteInput) -> pl.DataFrame:
                 "ocel_id": ocel_id,
                 "attribute": attr,
                 "actual_value": value,
-                "issue": "missing_value",
+                "issue": "missing_attribute_value",
             }
             for ocel_type, ocel_id, attr, _, value in _iter_object_attrs(conn)
             if _is_missing(value)
@@ -104,10 +104,10 @@ def detect_missing_attributes(src: SqliteInput) -> pl.DataFrame:
     )
 
 
-def detect_incorrect_datatypes(src: SqliteInput) -> pl.DataFrame:
+def detect_wrong_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
     """Find attribute values that don't match the column's declared SQLite type.
 
-    NULL/empty values are skipped (covered by `detect_missing_attributes`).
+    NULL/empty values are skipped (covered by `detect_missing_attribute_value`).
     """
     with _connect(src) as conn:
         rows = [
@@ -118,7 +118,7 @@ def detect_incorrect_datatypes(src: SqliteInput) -> pl.DataFrame:
                 "expected_type": declared,
                 "actual_value": repr(value),
                 "actual_python_type": type(value).__name__,
-                "issue": "wrong_datatype",
+                "issue": "wrong_attribute_datatype",
             }
             for ocel_type, ocel_id, attr, declared, value in _iter_object_attrs(conn)
             if not _is_missing(value) and not _value_matches_type(value, declared)
@@ -132,7 +132,7 @@ def detect_incorrect_datatypes(src: SqliteInput) -> pl.DataFrame:
     )
 
 
-def detect_dangling_o2o_relations(src: SqliteInput) -> pl.DataFrame:
+def detect_dangling_o2o_relationship(src: SqliteInput) -> pl.DataFrame:
     """Find object-to-object relationships referencing missing objects."""
     with _connect(src) as conn:
         objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn)
@@ -170,7 +170,7 @@ def detect_dangling_o2o_relations(src: SqliteInput) -> pl.DataFrame:
         .then(pl.lit("source"))
         .otherwise(pl.lit("target"))
         .alias("missing_side"),
-        pl.lit("dangling_o2o").alias("issue"),
+        pl.lit("dangling_o2o_relationship").alias("issue"),
     ).select(cols).cast({c: pl.Utf8 for c in cols})
 
 
@@ -178,7 +178,7 @@ def detect_dangling_o2o_relations(src: SqliteInput) -> pl.DataFrame:
 # New detectors
 # ---------------------------------------------------------------------------
 
-def detect_duplicate_object_ids(src: SqliteInput) -> pl.DataFrame:
+def detect_duplicate_objects_on_ids(src: SqliteInput) -> pl.DataFrame:
     """Find ocel_ids that appear more than once in the main object table.
 
     One row is emitted per duplicated ocel_id.  ``ocel_types`` lists every
@@ -197,13 +197,13 @@ def detect_duplicate_object_ids(src: SqliteInput) -> pl.DataFrame:
             pl.col("ocel_type").unique().sort().str.join(", ").alias("ocel_types"),
         )
         .filter(pl.col("count") > 1)
-        .with_columns(pl.lit("duplicate_id").alias("issue"))
+        .with_columns(pl.lit("duplicate_objects_on_ids").alias("issue"))
         .select(cols)
         .cast({c: pl.Utf8 for c in cols})
     )
 
 
-def detect_duplicate_object_attributes(src: SqliteInput) -> pl.DataFrame:
+def detect_duplicate_objects_on_attributes(src: SqliteInput) -> pl.DataFrame:
     """Find objects within the same type-table that share identical attribute
     values but carry different ocel_ids.
 
@@ -235,7 +235,7 @@ def detect_duplicate_object_attributes(src: SqliteInput) -> pl.DataFrame:
                     "ocel_ids": ", ".join(ids),
                     "duplicate_count": str(len(ids)),
                     "attribute_values": str(dict(zip(attr_cols, key))),
-                    "issue": "duplicate_attributes",
+                    "issue": "duplicate_objects_on_attributes",
                 })
     return _frame(
         rows,
@@ -243,7 +243,7 @@ def detect_duplicate_object_attributes(src: SqliteInput) -> pl.DataFrame:
     )
 
 
-def detect_missing_object_types(src: SqliteInput) -> pl.DataFrame:
+def detect_missing_object_type(src: SqliteInput) -> pl.DataFrame:
     """Find objects in the main object table whose ocel_type is NULL or
     empty/whitespace."""
     with _connect(src) as conn:
@@ -262,11 +262,11 @@ def detect_missing_object_types(src: SqliteInput) -> pl.DataFrame:
     )
 
 
-def detect_dangling_e2o_relations(src: SqliteInput) -> pl.DataFrame:
+def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
     """Find event-to-object relationships referencing a non-existent event,
     a non-existent object, or both.
 
-    Columns mirror detect_dangling_o2o_relations:
+    Columns mirror detect_dangling_o2o_relationship:
         ocel_event_id, event_type, ocel_object_id, object_type,
         ocel_qualifier, missing_side, issue
     ``missing_side`` is ``"event"``, ``"object"``, or ``"both"``.
@@ -311,7 +311,7 @@ def detect_dangling_e2o_relations(src: SqliteInput) -> pl.DataFrame:
             .then(pl.lit("event"))
             .otherwise(pl.lit("object"))
             .alias("missing_side"),
-            pl.lit("dangling_e2o").alias("issue"),
+            pl.lit("dangling_e2o_relationship").alias("issue"),
         )
         .select(cols)
         .cast({c: pl.Utf8 for c in cols})
@@ -321,11 +321,11 @@ def detect_dangling_e2o_relations(src: SqliteInput) -> pl.DataFrame:
 def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
-        "missing_attributes":        detect_missing_attributes(src),
-        "incorrect_datatypes":       detect_incorrect_datatypes(src),
-        "dangling_o2o_relations":    detect_dangling_o2o_relations(src),
-        "duplicate_object_ids":      detect_duplicate_object_ids(src),
-        "duplicate_object_attributes": detect_duplicate_object_attributes(src),
-        "missing_object_types":      detect_missing_object_types(src),
-        "dangling_e2o_relations":    detect_dangling_e2o_relations(src),
+        "missing_attribute_value":          detect_missing_attribute_value(src),
+        "wrong_attribute_datatype":         detect_wrong_attribute_datatype(src),
+        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
+        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
+        "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
+        "missing_object_type":              detect_missing_object_type(src),
+        "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
     }
