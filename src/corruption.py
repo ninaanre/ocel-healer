@@ -88,6 +88,37 @@ def inject_n10_object(conn: sqlite3.Connection) -> str | None:
     return fake_object_id
 
 
+def inject_n3a_missing_attribute(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    *,
+    count: int = 1,
+    changed_field_col: str = "ocel_changed_field",
+) -> list[str]:
+    """N3a: Set `column` to NULL in `count` initial-state rows of `table`.
+
+    Only targets rows where changed_field_col IS NULL (initial state),
+    so the missing values are genuine data quality issues, not delta artifacts.
+    """
+    has_changed_field = conn.execute(
+        f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?",
+        (changed_field_col,),
+    ).fetchone()[0]
+    where = (
+        f'WHERE "{changed_field_col}" IS NULL AND "{column}" IS NOT NULL'
+        if has_changed_field
+        else f'WHERE "{column}" IS NOT NULL'
+    )
+    rows = conn.execute(
+        f'SELECT ocel_id FROM "{table}" {where} LIMIT ?', (count,)
+    ).fetchall()
+    affected = [r[0] for r in rows]
+    for ocel_id in affected:
+        conn.execute(f'UPDATE "{table}" SET "{column}" = NULL WHERE ocel_id = ?', (ocel_id,))
+    return affected
+
+
 def inject_n10_event(conn: sqlite3.Connection) -> str | None:
     """N10: Insert an E2O relation referencing a non-existent event."""
     obj = conn.execute("SELECT ocel_id FROM object WHERE ocel_type IS NOT NULL LIMIT 1").fetchone()
