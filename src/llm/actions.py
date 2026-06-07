@@ -119,7 +119,8 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
 
     # Confidence gate -- short-circuits the task's own parse path. We still
     # try for a routable target so the dashboard can offer an override.
-    if confidence < MIN_CONFIDENCE:
+    threshold = task.min_confidence if task.min_confidence is not None else MIN_CONFIDENCE
+    if confidence < threshold:
         bits = [f"Confidence {confidence:.2f} below threshold {MIN_CONFIDENCE:.2f}."]
         if proposed_value is not None:
             bits.append(f"Would have proposed: {proposed_value!r}.")
@@ -257,7 +258,11 @@ def _validate_target(conn: sqlite3.Connection, action: dict) -> tuple[str, str]:
     }
     table = action["target_table"]
     if table not in allowed_tables:
-        raise ValueError(f"Refusing to repair: unknown table {table!r}.")
+        # Try case-insensitive match (ocel_type vs ocel_type_map may differ in casing)
+        table_map = {t.lower(): t for t in allowed_tables}
+        if table.lower() not in table_map:
+            raise ValueError(f"Refusing to repair: unknown table {table!r}.")
+        table = table_map[table.lower()]
     cols = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
     col = action["column"]
     if col not in cols:
