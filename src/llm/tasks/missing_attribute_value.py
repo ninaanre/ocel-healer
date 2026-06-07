@@ -4,6 +4,7 @@ from src.llm.tasks._base import IssueTask
 
 class MissingAttributeValue(IssueTask):
     issue_key = "missing_attribute_value"
+    min_confidence = 0.0  # always attempt repair; model is instructed to always guess
 
     PROMPT = """\
         <task>
@@ -31,6 +32,13 @@ class MissingAttributeValue(IssueTask):
           3. Use `events` activity names and qualifiers as a tiebreaker
              (e.g. activity 'pay_in_eur' on the anchor implies currency='EUR').
           4. Match the data type, units, and formatting of the peer values exactly.
+          5. If `violation.attribute_name` is "weight" and the anchor object type is Product/Products,
+   treat `anchor_entity.name` or `anchor_entity.object_id` as the product name.
+   If it is a recognizable real-world product, estimate its real-world weight from
+   DOMAIN_KNOWLEDGE. Return the value in kilograms, because peer weights in this
+   dataset are stored in kg. Do not copy a peer's weight unless the anchor product
+   cannot be recognized.
+
         </method>
 
         <example>
@@ -41,18 +49,60 @@ class MissingAttributeValue(IssueTask):
         </example>
 
         <output>
-        JSON: {"inferred_value": any|null, "rationale": str, "confidence": number}
+        JSON: {"inferred_value": <your best guess>, "rationale": str, "confidence": number}
+
+        `inferred_value` must ALWAYS be a concrete value — never null.
+        If local context and domain knowledge are both weak, still return your best
+        estimate based on the object's name and other attributes, and set confidence
+        accordingly (e.g. 0.3). A low-confidence guess is always better than null.
+
+        For Products in the order-management dataset, the product name may be stored
+as the OCEL object id. If anchor_entity.name is missing, use
+anchor_entity.object_id as the product name.
+
         </output>
     """
 
     def extend_context(self, conn, ctx: dict, row: dict) -> None:
         self._attach_peers(conn, ctx, row)
+        attrs = ctx.get("object", {}).get("attributes", {})
+        anchor_id = ctx.get("object", {}).get("ocel_id")
+
+        name = next(
+            (
+                str(v)
+                for k, v in attrs.items()
+                if k.lower() in ("name", "title", "product_name", "label")
+                and v not in (None, "")
+            ),
+            None,
+        )
+
+        # In the order-management dataset, product names are encoded as ocel_id.
+        if not name and row.get("object_type") == "Products":
+            name = str(anchor_id) if anchor_id else None
+
+        ctx["anchor_entity"] = {
+            "name": name,
+            "object_id": anchor_id,
+            "object_type": row.get("object_type"),
+            "missing_attribute": row.get("attribute") or row.get("attribute_name"),
+        }
+        ctx["data_semantics"] = {
+            "encoding": "delta",
+            "explanation": (
+                "Each object-type table stores the initial object state (ocel_changed_field IS NULL) "
+                "plus one row per attribute change. NULL values in change rows are normal — "
+                "only the changed attribute is required. The violation you are repairing is "
+                "from an initial-state row, so the NULL IS genuinely missing."
+            ),
+        }
 
     def parse_payload(self, row: dict, payload: dict) -> ActionResult:
         new = payload.get("inferred_value")
         if new is None:
-            reason = (payload.get("rationale") or "").strip() or "no reason provided"
-            return ActionResult.decline(f"LLM declined to infer a value: {reason}")
+            # Model ignored the instruction — treat as unrecoverable for this row
+            return ActionResult.decline("LLM returned null despite instructions to always guess")
         target = object_attribute_target(row)
         if target is None:
             return ActionResult.unrouted(
