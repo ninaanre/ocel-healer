@@ -7,6 +7,7 @@ def get_task(issue_key: str) -> IssueTask | None:
 
 from src.llm.tasks import (
     missing_object_type,
+    incorrect_object_type,
     missing_attribute_value,
     wrong_attribute_datatype,
     dangling_o2o_relationship,

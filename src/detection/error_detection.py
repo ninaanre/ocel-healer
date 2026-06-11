@@ -262,6 +262,34 @@ def detect_missing_object_type(src: SqliteInput) -> pl.DataFrame:
     )
 
 
+def detect_incorrect_object_type(src: SqliteInput, sample_per_type: int = 10) -> pl.DataFrame:
+    """Sample objects to feed to the LLM for "is this type correct?" judgment.
+
+    The actual incorrect/correct decision is made by the domain-expert LLM; this
+    detector only chooses which objects to ask about. Up to `sample_per_type`
+    rows are returned per object type, ordered deterministically by ocel_id.
+    Objects with NULL or empty ocel_type are skipped -- those are handled by
+    detect_missing_object_type.
+    """
+    cols = ["ocel_id", "ocel_type", "issue"]
+    with _connect(src) as conn:
+        rows: list[dict] = []
+        for ocel_type, _ in _object_type_tables(conn):
+            sampled = conn.execute(
+                "SELECT ocel_id FROM object "
+                "WHERE ocel_type = ? AND ocel_id IS NOT NULL "
+                "ORDER BY ocel_id LIMIT ?",
+                (ocel_type, sample_per_type),
+            ).fetchall()
+            for (ocel_id,) in sampled:
+                rows.append({
+                    "ocel_id": ocel_id,
+                    "ocel_type": ocel_type,
+                    "issue": "incorrect_object_type",
+                })
+    return _frame(rows, cols)
+
+
 def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
     """Find event-to-object relationships referencing a non-existent event,
     a non-existent object, or both.
@@ -327,5 +355,6 @@ def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
         "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
         "missing_object_type":              detect_missing_object_type(src),
+        "incorrect_object_type":            detect_incorrect_object_type(src),
         "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
     }
