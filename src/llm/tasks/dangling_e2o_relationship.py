@@ -1,5 +1,5 @@
 from src.llm.actions import ActionResult, relation_swap_target
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
 _E2O_SIDES = {
@@ -8,7 +8,7 @@ _E2O_SIDES = {
 }
 
 
-class DanglingE2ORelationship(IssueTask):
+class DanglingE2ORelationship(ResolutionTask):
     issue_key = "dangling_e2o_relationship"
 
     PROMPT = """\
