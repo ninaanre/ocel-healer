@@ -239,6 +239,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
     obj_section = _section("Objects", [
         ("Missing types",        "missing_object_type",              results["missing_object_type"],              _bad_col("ocel_type")),
+        ("Incorrect types",      "incorrect_object_type",            results["incorrect_object_type"],            _bad_col("ocel_type")),
         ("Duplicate IDs",        "duplicate_objects_on_ids",         results["duplicate_objects_on_ids"],         _bad_dup_id),
         ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
     ])
