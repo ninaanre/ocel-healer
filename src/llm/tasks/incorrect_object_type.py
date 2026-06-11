@@ -1,8 +1,7 @@
-from src.llm.actions import ActionResult
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import DetectionResult, DetectionTask
 
 
-class IncorrectObjectType(IssueTask):
+class IncorrectObjectType(DetectionTask):
     issue_key = "incorrect_object_type"
 
     PROMPT = """\
@@ -60,23 +59,19 @@ class IncorrectObjectType(IssueTask):
         </output>
     """
 
-    def parse_payload(self, row: dict, payload: dict) -> ActionResult:
-        new = payload.get("inferred_type")
-        if not new:
-            reason = (payload.get("rationale") or "").strip() or "no reason provided"
-            return ActionResult.decline(
-                f"LLM agrees the existing type is correct (or evidence too weak): {reason}"
+    def parse_detection(self, row: dict, payload: dict) -> DetectionResult:
+        rationale = str(payload.get("rationale", "") or "").strip()
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+        suggested = payload.get("inferred_type")
+        # Treat null / empty / "same as current" as "not flagged".
+        if not suggested or suggested == row.get("ocel_type"):
+            return DetectionResult(
+                flagged=False, rationale=rationale, confidence=confidence,
+                suggested_value=None,
             )
-        if new == row.get("ocel_type"):
-            return ActionResult.decline(
-                "LLM returned the existing type -- no change needed."
-            )
-        return ActionResult.update(
-            target_table="object",
-            target_pk={"ocel_id": row["ocel_id"]},
-            column="ocel_type",
-            old_value=row.get("ocel_type"),
-            new_value=new,
+        return DetectionResult(
+            flagged=True, rationale=rationale, confidence=confidence,
+            suggested_value=suggested,
         )
 
     def suppressed_target(self, row: dict) -> dict | None:
