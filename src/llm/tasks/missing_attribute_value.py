@@ -1,8 +1,8 @@
 from src.llm.actions import ActionResult, object_attribute_target
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
-class MissingAttributeValue(IssueTask):
+class MissingAttributeValue(ResolutionTask):
     issue_key = "missing_attribute_value"
 
     PROMPT = """\

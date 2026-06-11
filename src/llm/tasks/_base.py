@@ -1,6 +1,7 @@
 import sqlite3
 import textwrap
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from src.detection.error_detection import _column_info, _object_type_tables
@@ -13,12 +14,38 @@ if TYPE_CHECKING:
 REGISTRY: dict[str, "IssueTask"] = {}
 
 
-class IssueTask(ABC):
-    """Base class for one repair task per issue type.
+@dataclass
+class DetectionResult:
+    """LLM verdict for a *detection* task.
 
-    Subclasses set `issue_key` and `PROMPT`, implement `parse_payload`, and
-    optionally override `extend_context`, `anchor`, and `suppressed_target`.
-    Importing the module self-registers via `__init_subclass__`.
+    `flagged=True` means the LLM judged the candidate as a real violation.
+    `suggested_value` is the LLM's proposed correct value when applicable
+    (e.g. the inferred correct ocel_type) -- it travels with the flag so
+    callers can either show it or discard it. `flagged=False` means
+    "looks fine / unsure"; the dashboard drops these silently.
+    """
+    flagged: bool
+    rationale: str = ""
+    confidence: float = 0.0
+    suggested_value: Any = None
+
+
+class IssueTask(ABC):
+    """Base class for one task per issue type.
+
+    Two flavours subclass this:
+      - ResolutionTask: the violation is already known (deterministic detector
+        found it); the LLM only proposes a fix. parse_payload returns an
+        ActionResult.
+      - DetectionTask: the LLM is the one deciding whether a violation exists.
+        parse_detection returns a DetectionResult; parse_payload bridges to
+        an ActionResult so the existing suggest_repair / apply_repair path
+        still works for fix-time calls.
+
+    Subclasses set `issue_key` and `PROMPT`, implement the appropriate parse
+    method, and optionally override `extend_context`, `anchor`, and
+    `suppressed_target`. Importing the module self-registers via
+    `__init_subclass__`.
     """
 
     issue_key: ClassVar[str] = ""
@@ -26,6 +53,9 @@ class IssueTask(ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        # Only register concrete tasks (those that set an issue_key). The
+        # intermediate base classes ResolutionTask / DetectionTask leave
+        # issue_key="" and skip registration.
         if getattr(cls, "issue_key", ""):
             REGISTRY[cls.issue_key] = cls()
 
@@ -116,3 +146,65 @@ class IssueTask(ABC):
             (anchor_id,),
         ).fetchall()
         ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
+
+
+# --- Intermediate base classes -------------------------------------------
+# Concrete tasks subclass one of these two -- never IssueTask directly.
+
+class ResolutionTask(IssueTask):
+    """LLM-as-fix-proposer.
+
+    The violation is already known (a deterministic Polars detector found
+    it); the LLM's job is to suggest the corrected value. Subclasses
+    implement `parse_payload` to return an `ActionResult`. Used for the 6
+    classic detectors: missing_object_type, missing_attribute_value,
+    wrong_attribute_datatype, dangling_*, duplicate_*.
+    """
+    # No new methods -- the contract is exactly IssueTask.parse_payload.
+    # Existing as a named subclass purely for clarity / isinstance checks.
+
+
+class DetectionTask(IssueTask):
+    """LLM-as-detector.
+
+    The LLM judges *whether* a candidate is a real violation. Subclasses
+    implement `parse_detection` returning a `DetectionResult`; the base
+    class bridges that into `parse_payload` so the existing
+    suggest_repair / apply_repair plumbing keeps working at fix-time.
+    """
+
+    @abstractmethod
+    def parse_detection(self, row: dict, payload: dict) -> DetectionResult:
+        """Translate the LLM JSON payload into a DetectionResult."""
+
+    # Bridge: when something asks the detection task for an ActionResult
+    # (e.g. existing suggest_repair callers), reuse the LLM's verdict.
+    # `flagged=True` + a suggested_value -> update; otherwise -> decline.
+    def parse_payload(self, row: dict, payload: dict) -> "ActionResult":
+        from src.llm.actions import ActionResult
+
+        verdict = self.parse_detection(row, payload)
+        if not verdict.flagged or verdict.suggested_value is None:
+            reason = (verdict.rationale or "no reason provided").strip()
+            return ActionResult.decline(
+                f"LLM did not flag this row as a violation: {reason}"
+            )
+        return self.action_for_flag(row, verdict)
+
+    def action_for_flag(self, row: dict, verdict: DetectionResult) -> "ActionResult":
+        """How to write a confirmed flag back to the DB. Subclasses override
+        when the bridge needs more than the default suppressed_target shape."""
+        from src.llm.actions import ActionResult
+
+        target = self.suppressed_target(row)
+        if target is None:
+            return ActionResult.unrouted(
+                "DetectionTask flagged but has no routable target."
+            )
+        return ActionResult.update(
+            target_table=target["target_table"],
+            target_pk=target["target_pk"],
+            column=target["column"],
+            old_value=target["old_value"],
+            new_value=verdict.suggested_value,
+        )
