@@ -35,7 +35,7 @@ class MissingAttributeValue(IssueTask):
           5. If `violation.attribute_name` is "weight" and the anchor object type is Product/Products,
    treat `anchor_entity.name` or `anchor_entity.object_id` as the product name.
    If it is a recognizable real-world product, estimate its real-world weight from
-   DOMAIN_KNOWLEDGE. Return the value in kilograms, because peer weights in this
+   DOMAIN_KNOWLEDGE. Return the value in grams, because peer weights in this
    dataset are stored in kg. Do not copy a peer's weight unless the anchor product
    cannot be recognized.
 

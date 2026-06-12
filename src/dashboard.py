@@ -340,6 +340,23 @@ def expert_suggest(
                 f"Rationale: {action['rationale']}"
             ).callout(kind="info")
         bar_pct = int(round(action["confidence"] * 100))
+        confidence_bar = (
+            f"<div style='margin-top:6px'><b>Confidence:</b> {action['confidence']:.2f}"
+            f" <div style='display:inline-block; background:#eee; border-radius:4px; "
+            f"width:200px; height:10px; vertical-align:middle; margin-left:8px;'>"
+            f"<div style='background:#0969da; width:{bar_pct}%; height:10px; border-radius:4px;'></div>"
+            f"</div></div>"
+        )
+        if action["kind"] == "delete":
+            pk_str = ", ".join(f"{k}={v!r}" for k, v in action["target_pk"].items())
+            return mo.Html(
+                f"<div style='font-family:system-ui'>"
+                f"<div><b>Kind:</b> delete &nbsp; <b>Table:</b> {action['target_table']}</div>"
+                f"<div style='margin:6px 0'><b>Where:</b> <code>{pk_str}</code></div>"
+                f"<div style='margin:4px 0; color:#cf222e;'>Keeps the first row (MIN rowid), deletes all duplicates.</div>"
+                f"<div><b>Rationale:</b> {action['rationale']}</div>"
+                f"{confidence_bar}</div>"
+            )
         return mo.Html(
             f"<div style='font-family:system-ui'>"
             f"<div><b>Kind:</b> {action['kind']} &nbsp; <b>Table:</b> {action['target_table']} "
@@ -347,11 +364,7 @@ def expert_suggest(
             f"<div style='margin:6px 0'><b>Old →</b> <code>{action['old_value']!r}</code> "
             f"&nbsp; <b>New →</b> <code>{action['new_value']!r}</code></div>"
             f"<div><b>Rationale:</b> {action['rationale']}</div>"
-            f"<div style='margin-top:6px'><b>Confidence:</b> {action['confidence']:.2f}"
-            f" <div style='display:inline-block; background:#eee; border-radius:4px; "
-            f"width:200px; height:10px; vertical-align:middle; margin-left:8px;'>"
-            f"<div style='background:#0969da; width:{bar_pct}%; height:10px; border-radius:4px;'></div>"
-            f"</div></div></div>"
+            f"{confidence_bar}</div>"
         )
 
     def _is_routable(action):

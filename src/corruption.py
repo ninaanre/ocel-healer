@@ -23,11 +23,20 @@ def _remove_object_primary_key(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE object_tmp RENAME TO object")
 
 
-def inject_n6a(conn: sqlite3.Connection) -> str | None:
-    """N6(a): Insert a fully duplicated object (same ocel_id and ocel_type)."""
-    row = conn.execute(
-        "SELECT ocel_id, ocel_type FROM object WHERE ocel_type IS NOT NULL LIMIT 1"
-    ).fetchone()
+def inject_n6a(conn: sqlite3.Connection, ocel_id: str | None = None) -> str | None:
+    """N6(a): Insert a fully duplicated object (same ocel_id and ocel_type).
+
+    If `ocel_id` is given, that specific object is duplicated; otherwise the
+    first available object is used.
+    """
+    if ocel_id:
+        row = conn.execute(
+            "SELECT ocel_id, ocel_type FROM object WHERE ocel_id = ? LIMIT 1", (ocel_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT ocel_id, ocel_type FROM object WHERE ocel_type IS NOT NULL LIMIT 1"
+        ).fetchone()
     if row is None:
         return None
     conn.execute("INSERT INTO object VALUES (?, ?)", row)
