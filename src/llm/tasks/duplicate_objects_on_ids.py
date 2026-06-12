@@ -4,6 +4,7 @@ from src.llm.tasks._base import IssueTask
 
 class DuplicateObjectsOnIds(IssueTask):
     issue_key = "duplicate_objects_on_ids"
+    min_confidence = 0.0  # deterministic path ignores LLM confidence
 
     PROMPT = """\
         <task>
@@ -62,15 +63,31 @@ class DuplicateObjectsOnIds(IssueTask):
         ctx["duplicate_rows"] = [{"ocel_id": r[0], "ocel_type": r[1]} for r in rows]
 
     def parse_payload(self, row: dict, payload: dict) -> ActionResult:
-        # No clean single-column override target: a duplicate-ids resolution
-        # is a multi-row DELETE, not an UPDATE. The SQL is surfaced in the
-        # rationale so the user can run it manually.
+        ocel_id = row.get("ocel_id")
+        # ocel_types is the de-duped, comma-joined list from the detector
+        unique_types = [
+            t.strip() for t in (row.get("ocel_types") or "").split(",")
+            if t.strip() and t.strip().lower() != "none"
+        ]
+
+        # Pure N6(a): all duplicates share the same type → deterministic delete
+        if ocel_id and len(unique_types) == 1:
+            return ActionResult.delete(
+                target_table="object",
+                target_pk={"ocel_id": ocel_id},
+                reason=(
+                    f"All duplicate rows for '{ocel_id}' share type '{unique_types[0]}'. "
+                    "Keeping one row (MIN rowid), deleting the rest."
+                ),
+            )
+
+        # Types differ → surface LLM suggestion as unrouted noop for manual review
         canonical = payload.get("canonical_id")
         rationale = (payload.get("rationale") or "").strip()
         if not canonical:
-            reason = rationale or "no reason provided"
             return ActionResult.unrouted(
-                f"LLM could not determine a canonical object ID: {reason}"
+                rationale or "LLM could not determine a canonical object ID",
+                target_table="object",
             )
         ids_to_delete = payload.get("ids_to_delete") or []
         ids_str = ", ".join(repr(i) for i in ids_to_delete)
