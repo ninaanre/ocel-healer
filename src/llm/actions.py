@@ -36,6 +36,11 @@ class ActionResult:
         return cls(kind="update", **fields)
 
     @classmethod
+    def delete(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
+        """Delete duplicate rows keeping the one with MIN(rowid)."""
+        return cls(kind="delete", target_table=target_table, target_pk=target_pk, reason=reason)
+
+    @classmethod
     def decline(cls, reason: str) -> "ActionResult":
         return cls(kind="decline", reason=reason)
 
@@ -141,6 +146,15 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
                     "column": result.column, "old_value": result.old_value},
             new_value=result.new_value, rationale=rationale,
             confidence=confidence, issue_key=issue_key, proposed_value=result.new_value,
+        )
+
+    if result.kind == "delete":
+        return _action(
+            "delete",
+            target={"target_table": result.target_table, "target_pk": result.target_pk,
+                    "column": None, "old_value": None},
+            new_value=None, rationale=rationale or result.reason,
+            confidence=confidence, issue_key=issue_key, proposed_value=None,
         )
 
     if result.kind == "decline":
@@ -264,8 +278,8 @@ def _validate_target(conn: sqlite3.Connection, action: dict) -> tuple[str, str]:
             raise ValueError(f"Refusing to repair: unknown table {table!r}.")
         table = table_map[table.lower()]
     cols = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
-    col = action["column"]
-    if col not in cols:
+    col = action.get("column")
+    if col is not None and col not in cols:
         raise ValueError(f"Refusing to repair: unknown column {col!r} in {table!r}.")
     bad_pk = set(action["target_pk"]) - cols
     if bad_pk:
@@ -297,11 +311,28 @@ def apply_repair(
                 "Override cannot be applied: this noop has no routable target "
                 "(missing target_table, column, or target_pk)."
             )
-    elif action["kind"] != "update":
+    elif action["kind"] not in ("update", "delete"):
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
     with _connect(sqlite_path) as conn:
         table, col = _validate_target(conn, action)
+
+        if action["kind"] == "delete":
+            pk_items = list(action["target_pk"].items())
+            if len(pk_items) != 1:
+                raise ValueError("delete action requires exactly one primary key column")
+            pk_col, pk_val = pk_items[0]
+            sql = (
+                f"DELETE FROM {quote(table)} WHERE {quote(pk_col)} = ? "
+                f"AND rowid NOT IN (SELECT MIN(rowid) FROM {quote(table)} WHERE {quote(pk_col)} = ?)"
+            )
+            params = (pk_val, pk_val)
+            rendered = f"{sql}\n  with params = {params!r}"
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            with conn:
+                n = conn.execute(sql, params).rowcount
+            return f"Committed: {n} duplicate row(s) deleted.\n{rendered}"
 
         if has_override:
             new_value = _coerce_for_affinity(override_value, _column_affinity(conn, table, col))
