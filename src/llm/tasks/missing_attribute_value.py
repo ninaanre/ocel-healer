@@ -25,20 +25,14 @@ class MissingAttributeValue(IssueTask):
         </inputs>
 
         <method>
-          1. Look at `peer_objects[*][attribute_name]` to see what well-formed values
-             of this attribute look like (data type, units, casing).
-          2. Use the anchor's other attributes to narrow: many attributes correlate
-             (country↔currency, product_id↔category, etc.).
-          3. Use `events` activity names and qualifiers as a tiebreaker
-             (e.g. activity 'pay_in_eur' on the anchor implies currency='EUR').
-          4. Match the data type, units, and formatting of the peer values exactly.
-          5. If `violation.attribute_name` is "weight" and the anchor object type is Product/Products,
-   treat `anchor_entity.name` or `anchor_entity.object_id` as the product name.
-   If it is a recognizable real-world product, estimate its real-world weight from
-   DOMAIN_KNOWLEDGE. Return the value in grams, because peer weights in this
-   dataset are stored in kg. Do not copy a peer's weight unless the anchor product
-   cannot be recognized.
+          If `violation.attribute_name` is "weight" and the object type is product/products:
+            Look at `anchor_entity.name` or `anchor_entity.object_id` to identify the product.
+            Based solely on the product name, recall its real-world weight from your knowledge.
+            Return the weight in the same unit as `peer_objects` (check their values to determine kg vs g).
 
+          For all other attributes:
+            Use `peer_objects` to learn the typical value, data type, units, and format.
+            Use the anchor's other attributes and events as additional signals.
         </method>
 
         <example>
@@ -79,7 +73,7 @@ anchor_entity.object_id as the product name.
         )
 
         # In the order-management dataset, product names are encoded as ocel_id.
-        if not name and row.get("object_type") == "Products":
+        if not name and (row.get("object_type") or "").lower() in ("products", "product"):
             name = str(anchor_id) if anchor_id else None
 
         ctx["anchor_entity"] = {
