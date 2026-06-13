@@ -103,12 +103,14 @@ def inject_n3a_missing_attribute(
     column: str,
     *,
     count: int = 1,
+    ocel_ids: list[str] | None = None,
     changed_field_col: str = "ocel_changed_field",
 ) -> list[str]:
-    """N3a: Set `column` to NULL in `count` initial-state rows of `table`.
+    """N3a: Set `column` to NULL in initial-state rows of `table`.
 
-    Only targets rows where changed_field_col IS NULL (initial state),
-    so the missing values are genuine data quality issues, not delta artifacts.
+    Pass `ocel_ids` to target specific objects; otherwise the first `count`
+    eligible rows are used. Only targets rows where changed_field_col IS NULL
+    (initial state) so the missing values are genuine data quality issues.
     """
     has_changed_field = conn.execute(
         f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?",
@@ -119,9 +121,16 @@ def inject_n3a_missing_attribute(
         if has_changed_field
         else f'WHERE "{column}" IS NOT NULL'
     )
-    rows = conn.execute(
-        f'SELECT ocel_id FROM "{table}" {where} LIMIT ?', (count,)
-    ).fetchall()
+    if ocel_ids:
+        placeholders = ", ".join("?" * len(ocel_ids))
+        rows = conn.execute(
+            f'SELECT ocel_id FROM "{table}" {where} AND ocel_id IN ({placeholders})',
+            ocel_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f'SELECT ocel_id FROM "{table}" {where} LIMIT ?', (count,)
+        ).fetchall()
     affected = [r[0] for r in rows]
     for ocel_id in affected:
         conn.execute(f'UPDATE "{table}" SET "{column}" = NULL WHERE ocel_id = ?', (ocel_id,))

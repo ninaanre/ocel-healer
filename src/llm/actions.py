@@ -153,7 +153,7 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
             "delete",
             target={"target_table": result.target_table, "target_pk": result.target_pk,
                     "column": None, "old_value": None},
-            new_value=None, rationale=rationale or result.reason,
+            new_value=None, rationale=result.reason or rationale,
             confidence=confidence, issue_key=issue_key, proposed_value=None,
         )
 
