@@ -421,9 +421,6 @@ def expert_detection_sweep(
 def expert_detection_render(
     expert_tab, get_flags, mo, proposals, set_flags, sqlite_path, sweep_summary,
 ):
-    # Render one card per proposed flag with Agree/Reject buttons. The
-    # buttons live in mo.ui.array so marimo wires their clicks back through
-    # the reactivity graph.
     detection_view = None
     agree_array = None
     reject_array = None
@@ -481,10 +478,14 @@ def expert_detection_render(
                 cards.append(mo.md("---"))
             detection_view = mo.vstack([sweep_summary, *cards], gap=0.5)
 
-    # Apply Agree clicks: mirror each click into the confirmed_flags state.
-    # We do this in the same cell so reactivity is straightforward -- a click
-    # bumps the button's value, this cell re-runs, and we set_flags().
-    if proposals and agree_array is not None and reject_array is not None:
+    detection_view
+    return agree_array, reject_array  # <-- now exported, not consumed her
+
+@app.cell
+def expert_detection_agree(
+    agree_array, get_flags, proposals, set_flags, sqlite_path,
+):
+    if proposals and agree_array is not None:
         current = dict(get_flags())
         changed = False
         for _i, _prop in enumerate(proposals):
@@ -496,18 +497,13 @@ def expert_detection_render(
                     "ocel_id": _row["ocel_id"],
                     "ocel_type": _row.get("ocel_type"),
                     "issue": "incorrect_object_type",
-                    # Carry detection-time metadata for display only.
                     "_detected_suggestion": _v.suggested_value,
                     "_detected_rationale": _v.rationale,
                     "_detected_confidence": _v.confidence,
                 }
                 changed = True
-            # Reject is a no-op on confirmed flags -- the row simply won't
-            # be in `current_flags`. Re-running the sweep rebuilds the list.
         if changed:
             set_flags(current)
-
-    detection_view
     return
 
 
