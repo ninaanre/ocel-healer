@@ -243,12 +243,25 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
         ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
     ])
 
-    rel_section = _section("Relationships", [
+    rel_checks = [
         ("Object → Object", "dangling_o2o_relationship", results["dangling_o2o_relationship"], _bad_o2o),
         ("Event → Object",  "dangling_e2o_relationship", results["dangling_e2o_relationship"], _bad_e2o),
-    ])
+    ]
+    rel_pills = "".join(
+        f'<span style="color:{MUTED}; font-size:13px; margin-right:14px;">'
+        f'{label}&nbsp;{_badge(df.height)}</span>'
+        for label, _key, df, _ in rel_checks
+    )
+    rel_heading = mo.Html(
+        f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; margin:28px 0 0 0;">'
+        f'<span style="font-size:15px; font-weight:700; color:#1f2328;">Relationships</span>'
+        f'<div style="margin-top:4px;">{rel_pills}</div>'
+        f'</div>'
+    )
+    rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
+    rel_section = mo.vstack([rel_heading, mo.accordion({"Show tables": rel_tabs})], gap=0)
 
-    mo.vstack([attr_section, obj_section, rel_section], gap=0)
+    mo.vstack([obj_section, attr_section, rel_section], gap=0)
     return
 
 
