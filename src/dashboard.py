@@ -487,20 +487,31 @@ def expert_detection_render(
         else:
             n = len(proposals)
             agree_array = mo.ui.array([
-                mo.ui.button(value=0, on_click=lambda v: v + 1, label="✓ Agree")
+                mo.ui.button(value=0, on_click=lambda v: v + 1, label="Agree")
                 for _ in range(n)
             ])
             reject_array = mo.ui.array([
-                mo.ui.button(value=0, on_click=lambda v: v + 1, label="✗ Reject")
+                mo.ui.button(value=0, on_click=lambda v: v + 1, label="Reject")
                 for _ in range(n)
             ])
-            cards = []
+            cards = [
+                mo.md(
+                    "_**Agree** stages this flag for the **Resolution** tab — "
+                    "open it to review the SQL and click **Apply (commit)** to "
+                    "actually update the database. **Reject** hides the card "
+                    "for this sweep._"
+                ).callout(kind="info"),
+            ]
             current_flags = get_flags()
             for _i, _prop in enumerate(proposals):
                 _row = _prop["row"]
                 _v = _prop["verdict"]
                 _ocel_id = _row["ocel_id"]
                 _key = (sqlite_path, _ocel_id)
+                # User clicked Reject on this card — hide it for this sweep.
+                # (Reject is transient; rerunning the sweep can resurface it.)
+                if reject_array[_i].value:
+                    continue
                 _already = _key in current_flags
                 _bar_pct = int(round(_v.confidence * 100))
                 _header = mo.Html(
@@ -522,7 +533,7 @@ def expert_detection_render(
                     "</div>"
                 )
                 if _already:
-                    _controls = mo.md("✓ **Confirmed** — see Resolution tab.").callout(kind="success")
+                    _controls = mo.md("**Confirmed** — see Resolution tab.").callout(kind="success")
                 else:
                     _controls = mo.hstack(
                         [agree_array[_i], reject_array[_i]],
@@ -534,7 +545,7 @@ def expert_detection_render(
             detection_view = mo.vstack([sweep_summary, *cards], gap=0.5)
 
     detection_view
-    return agree_array, reject_array  # <-- now exported, not consumed her
+    return agree_array, reject_array
 
 @app.cell
 def expert_detection_agree(
