@@ -9,7 +9,7 @@ from src.llm.tasks import (
     missing_object_type,
     incorrect_object_type,
     missing_attribute_value,
-    wrong_attribute_datatype,
+    incorrect_attribute_datatype,
     dangling_o2o_relationship,
     dangling_e2o_relationship,
     duplicate_objects_on_ids,
