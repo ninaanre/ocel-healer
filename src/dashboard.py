@@ -8,7 +8,11 @@ def imports():
     import os
     import marimo as mo
     from pathlib import Path
-    from src.detection.error_detection import detect_all
+    from src.detection.error_detection import (
+        _connect as connect_sqlite,
+        _object_type_tables as object_type_tables,
+        detect_all,
+    )
     from src.llm import (
         MODEL,
         apply_repair,
@@ -24,9 +28,11 @@ def imports():
         DATA_DIR,
         MODEL,
         apply_repair,
+        connect_sqlite,
         detect_all,
         detect_all_with_llm,
         mo,
+        object_type_tables,
         ollama_ready,
         os,
         suggest_repair,
@@ -246,7 +252,6 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
     obj_section = _section("Objects", [
         ("Missing types",        "missing_object_type",              results["missing_object_type"],              _bad_col("ocel_type")),
-        ("Type candidates",      "incorrect_object_type",            results["incorrect_object_type"],            lambda _r, _c: False),
         ("Duplicate IDs",        "duplicate_objects_on_ids",         results["duplicate_objects_on_ids"],         _bad_dup_id),
         ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
     ])
@@ -358,62 +363,112 @@ def expert_helpers(mo):
 # ── Detection tab ────────────────────────────────────────────────────────
 
 @app.cell
-def expert_detection_button(expert_tab, llm_enabled, mo):
-    detect_btn = mo.ui.run_button(
-        label="Run detection across all types",
-        disabled=not llm_enabled,
+def expert_detection_controls(
+    object_type_tables, connect_sqlite, expert_tab, llm_enabled, mo, sqlite_path,
+):
+    # One-type-at-a-time sweep: pick a type, judge every instance of it.
+    # Loading the dropdown options is cheap (a single SELECT on object_map_type)
+    # so we always do it; the button stays disabled until LLM + a type are ready.
+    with connect_sqlite(sqlite_path) as _conn:
+        _types = [t for t, _ in object_type_tables(_conn)]
+    type_picker = mo.ui.dropdown(
+        options=_types,
+        label="Object type",
+        searchable=True,
     )
-    _detection_button_view = (
+    detect_btn = mo.ui.run_button(
+        label="Run detection on selected type",
+        disabled=not llm_enabled or not _types,
+    )
+    _controls_view = (
         mo.vstack([
             mo.md(
-                "Sweeps the candidate pool for `incorrect_object_type` (10 "
-                "objects per type, sampled deterministically). Each "
-                "candidate becomes one LLM call; flagged rows appear below "
-                "with rationale + confidence. Click **Agree** to confirm a "
-                "flag for the Resolution tab, or **Reject** to drop it."
+                "Pick an object type and judge **every** instance of it for "
+                "an incorrect `ocel_type`. One LLM call per object — large "
+                "types may take a while; flagged rows appear below with "
+                "rationale + confidence. Click **Agree** to confirm a flag "
+                "for the Resolution tab, or **Reject** to drop it."
             ),
-            detect_btn,
+            mo.hstack([type_picker, detect_btn], justify="start", gap=1),
         ], gap=0.5)
         if expert_tab.value == "Detection"
         else mo.md("")
     )
-    _detection_button_view
-    return (detect_btn,)
+    _controls_view
+    return detect_btn, type_picker
 
 
 @app.cell
 def expert_detection_sweep(
-    detect_btn,
+    connect_sqlite,
     detect_all_with_llm,
+    detect_btn,
     expert_tab,
     mo,
-    results,
     sqlite_path,
+    type_picker,
 ):
     # Run the sweep when the button has been clicked. Only fires when the
     # Detection tab is active so switching to Resolution doesn't re-run.
+    # Pulls every ocel_id of the chosen type and judges each one; progress
+    # bar shows running flagged count so big sweeps stay legible.
     proposals: list = []
     sweep_summary = None
-    if expert_tab.value == "Detection" and detect_btn.value:
-        candidates = list(results["incorrect_object_type"].iter_rows(named=True))
-        with mo.status.spinner(
-            title=f"Asking the LLM to judge {len(candidates)} candidates…"
-        ):
-            verdicts = detect_all_with_llm(
-                "incorrect_object_type",
-                candidates,
-                sqlite_path,
-            )
-        for _row, _verdict in verdicts:
-            if _verdict.flagged:
-                proposals.append({
-                    "row": dict(_row),
-                    "verdict": _verdict,
-                })
-        sweep_summary = mo.md(
-            f"Judged **{len(verdicts)}** candidates → "
-            f"**{len(proposals)}** proposed flag(s)."
-        ).callout(kind="info" if proposals else "success")
+    if (
+        expert_tab.value == "Detection"
+        and detect_btn.value
+        and type_picker.value
+    ):
+        chosen_type = type_picker.value
+        with connect_sqlite(sqlite_path) as _conn:
+            _ids = _conn.execute(
+                "SELECT ocel_id FROM object "
+                "WHERE ocel_type = ? AND ocel_id IS NOT NULL "
+                "ORDER BY ocel_id",
+                (chosen_type,),
+            ).fetchall()
+        candidates = [
+            {"ocel_id": _oid, "ocel_type": chosen_type, "issue": "incorrect_object_type"}
+            for (_oid,) in _ids
+        ]
+        total = len(candidates)
+        if total == 0:
+            sweep_summary = mo.md(
+                f"No objects found for type **`{chosen_type}`**."
+            ).callout(kind="warn")
+            verdicts: list = []
+        else:
+            flagged_count = [0]  # boxed so the progress callback can mutate it
+
+            def _on_progress(i, _total, _row, verdict, bar):
+                if verdict.flagged:
+                    flagged_count[0] += 1
+                bar.update(
+                    increment=1,
+                    subtitle=f"{i}/{_total} judged · {flagged_count[0]} flagged so far",
+                )
+
+            with mo.status.progress_bar(
+                total=total,
+                title=f"Judging {total} `{chosen_type}` object(s)…",
+                subtitle=f"0/{total} judged · 0 flagged so far",
+            ) as _bar:
+                verdicts = detect_all_with_llm(
+                    "incorrect_object_type",
+                    candidates,
+                    sqlite_path,
+                    on_progress=lambda i, t, r, v: _on_progress(i, t, r, v, _bar),
+                )
+            for _row, _verdict in verdicts:
+                if _verdict.flagged:
+                    proposals.append({
+                        "row": dict(_row),
+                        "verdict": _verdict,
+                    })
+            sweep_summary = mo.md(
+                f"Judged **{len(verdicts)}** `{chosen_type}` object(s) → "
+                f"**{len(proposals)}** proposed flag(s)."
+            ).callout(kind="info" if proposals else "success")
     return proposals, sweep_summary
 
 
