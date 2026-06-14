@@ -336,11 +336,11 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
 def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
+        "missing_object_type":              detect_missing_object_type(src),
+        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "missing_attribute_value":          detect_missing_attribute_value(src),
         "wrong_attribute_datatype":         detect_wrong_attribute_datatype(src),
-        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
-        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
-        "missing_object_type":              detect_missing_object_type(src),
+        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
         "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
     }
