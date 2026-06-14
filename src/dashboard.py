@@ -302,7 +302,7 @@ def expert_helpers(mo):
     # cells can render action cards / parse override input consistently.
     import json as _json
 
-    def _render_action(action):
+    def render_action(action):
         if action["kind"] == "noop":
             return mo.md(
                 f"**No-op suggestion** (confidence {action['confidence']:.2f}).\n\n"
@@ -323,14 +323,14 @@ def expert_helpers(mo):
             f"</div></div></div>"
         )
 
-    def _is_routable(action):
+    def is_routable(action):
         return (
             action.get("target_table")
             and action.get("column")
             and action.get("target_pk")
         )
 
-    def _override_default(action):
+    def override_default(action):
         proposed = action.get("proposed_value")
         if proposed is None:
             proposed = action.get("new_value")
@@ -341,7 +341,7 @@ def expert_helpers(mo):
         except (TypeError, ValueError):
             return str(proposed)
 
-    def _parse_override(text):
+    def parse_override(text):
         if text is None:
             return None
         stripped = text.strip()
@@ -352,7 +352,7 @@ def expert_helpers(mo):
         except (ValueError, TypeError):
             return text
 
-    return _is_routable, _override_default, _parse_override, _render_action
+    return is_routable, override_default, parse_override, render_action
 
 
 # ── Detection tab ────────────────────────────────────────────────────────
@@ -607,14 +607,14 @@ def expert_buttons(expert_tab, llm_enabled, mo):
 
 @app.cell
 def expert_suggest(
-    _is_routable,
-    _override_default,
-    _render_action,
     ask_btn,
     detector,
     expert_tab,
+    is_routable,
     llm_enabled,
     mo,
+    override_default,
+    render_action,
     res_rows,
     row_picker,
     sqlite_path,
@@ -639,10 +639,10 @@ def expert_suggest(
             _row = res_rows[idx]
             try:
                 suggestion = suggest_repair(detector.value, _row, sqlite_path)
-                action_view = _render_action(suggestion)
-                if _is_routable(suggestion):
+                action_view = render_action(suggestion)
+                if is_routable(suggestion):
                     override_input = mo.ui.text(
-                        value=_override_default(suggestion),
+                        value=override_default(suggestion),
                         label="Override value (JSON or raw text)",
                         full_width=True,
                     )
@@ -670,7 +670,6 @@ def expert_suggest(
 
 @app.cell
 def expert_apply(
-    _parse_override,
     apply_commit_btn,
     apply_dryrun_btn,
     apply_repair,
@@ -681,6 +680,7 @@ def expert_apply(
     override_commit_btn,
     override_dryrun_btn,
     override_input,
+    parse_override,
     res_rows,
     row_picker,
     set_flags,
@@ -735,7 +735,7 @@ def expert_apply(
                     "_This action has no routable target; override is not available._"
                 ).callout(kind="warn")
             else:
-                _parsed = _parse_override(override_input.value)
+                _parsed = parse_override(override_input.value)
                 _dry = override_dryrun_btn.value and not override_commit_btn.value
                 try:
                     _msg = apply_repair(
