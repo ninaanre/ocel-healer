@@ -247,7 +247,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
     attr_section = _section("Attributes", [
         ("Missing values",   "missing_attribute_value",   results["missing_attribute_value"],   _bad_col("actual_value")),
-        ("Wrong datatypes",  "wrong_attribute_datatype",  results["wrong_attribute_datatype"],  _bad_col("actual_value")),
+        ("Incorrect datatypes",  "incorrect_attribute_datatype",  results["incorrect_attribute_datatype"],  _bad_col("actual_value")),
     ])
 
     obj_section = _section("Objects", [
@@ -568,10 +568,15 @@ def expert_detection_agree(
 def expert_pickers(expert_tab, get_flags, mo, results, sqlite_path):
     # In Resolution mode, expose every detector that has rows to act on,
     # PLUS `incorrect_object_type` if the user has confirmed any flags.
-    available = [k for k, df in results.items() if df.height > 0 and k != "incorrect_object_type"]
+    # Sorted alphabetically so the dropdown order is stable / predictable.
+    available = sorted(
+        k for k, df in results.items()
+        if df.height > 0 and k != "incorrect_object_type"
+    )
     n_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
     if n_confirmed > 0:
-        available.insert(0, "incorrect_object_type")
+        available.append("incorrect_object_type")
+        available.sort()
     detector = mo.ui.dropdown(
         options=available, value=(available[0] if available else None),
         label="Issue type",

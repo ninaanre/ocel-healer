@@ -129,7 +129,7 @@ class IssueTask(ABC):
 
     def _attach_peers(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
         """Attach `peer_objects`: up to 5 other rows of the same type, full
-        attribute rows. Used by missing_attribute_value / wrong_attribute_datatype
+        attribute rows. Used by missing_attribute_value / incorrect_attribute_datatype
         so the LLM can learn typical value shape/format."""
         anchor_id, anchor_type = self.anchor(row)
         if not anchor_id:
@@ -158,7 +158,7 @@ class ResolutionTask(IssueTask):
     it); the LLM's job is to suggest the corrected value. Subclasses
     implement `parse_payload` to return an `ActionResult`. Used for the 6
     classic detectors: missing_object_type, missing_attribute_value,
-    wrong_attribute_datatype, dangling_*, duplicate_*.
+    incorrect_attribute_datatype, dangling_*, duplicate_*.
     """
     # No new methods -- the contract is exactly IssueTask.parse_payload.
     # Existing as a named subclass purely for clarity / isinstance checks.
