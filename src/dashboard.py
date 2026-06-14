@@ -739,18 +739,17 @@ def expert_apply(
         if suggestion is None:
             apply_view = mo.md("_Run the domain expert first._")
         else:
-            # Empty override input -> use the LLM suggestion as-is.
-            # Non-empty -> parse and pass to apply_repair as override_value.
+            # Empty override input -> call apply_repair WITHOUT override_value
+            # so it uses the LLM suggestion's new_value. Passing
+            # override_value=None would be interpreted as "set the column to
+            # NULL" because apply_repair uses a sentinel to detect "unset".
             _raw = override_input.value if override_input is not None else ""
-            _use_override = _raw.strip() != ""
-            _parsed = parse_override(_raw) if _use_override else None
             _dry = dry_run_toggle.value
+            _kwargs = {"dry_run": _dry}
+            if _raw.strip() != "":
+                _kwargs["override_value"] = parse_override(_raw)
             try:
-                _msg = apply_repair(
-                    sqlite_path, suggestion,
-                    dry_run=_dry,
-                    override_value=_parsed,
-                )
+                _msg = apply_repair(sqlite_path, suggestion, **_kwargs)
                 _kind = "info" if _dry else "success"
                 _prefix = "" if _dry else "✅\n\n"
                 _suffix = (
