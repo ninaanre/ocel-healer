@@ -266,17 +266,26 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
 
 @app.cell
-def expert_header(mo):
-    mo.md("""
-    ---
-    ## Domain Expert (LLM)
-    Two flows: **Detection** asks the LLM to flag suspicious rows from a
-    pool of candidates (one LLM call per candidate). **Resolution** lets
-    you fix flagged rows — both the confirmed `incorrect_object_type`
-    flags from the Detection tab and the deterministic detectors above.
-    Suggestions are dry-run by default — review the SQL before committing.
-    """)
-    return
+def expert_header_and_tabs(mo):
+    # Render the header and the Detection/Resolution tab strip together so
+    # the switcher sits immediately under the section title — downstream
+    # cells gated on `expert_tab.value` only fill the active tab body.
+    expert_tab = mo.ui.tabs(
+        {
+            "Detection": mo.md(""),  # bodies are filled in by downstream cells
+            "Resolution": mo.md(""),
+        },
+        value="Detection",
+    )
+    mo.vstack([
+        mo.md("""
+        ---
+        ## Domain Expert (LLM)
+        _Detection flags suspicious rows; Resolution proposes and applies repairs._
+        """),
+        expert_tab,
+    ], gap=0.5)
+    return (expert_tab,)
 
 
 @app.cell
@@ -287,18 +296,6 @@ def expert_state(mo):
     # it back to suggest_repair without rebuilding it.
     get_flags, set_flags = mo.state({})
     return get_flags, set_flags
-
-
-@app.cell
-def expert_tabs(mo):
-    expert_tab = mo.ui.tabs(
-        {
-            "Detection": mo.md(""),  # bodies are filled in by downstream cells
-            "Resolution": mo.md(""),
-        },
-        value="Detection",
-    )
-    return (expert_tab,)
 
 
 @app.cell
@@ -335,17 +332,6 @@ def expert_helpers(mo):
             and action.get("target_pk")
         )
 
-    def override_default(action):
-        proposed = action.get("proposed_value")
-        if proposed is None:
-            proposed = action.get("new_value")
-        if proposed is None:
-            return ""
-        try:
-            return _json.dumps(proposed)
-        except (TypeError, ValueError):
-            return str(proposed)
-
     def parse_override(text):
         if text is None:
             return None
@@ -357,7 +343,7 @@ def expert_helpers(mo):
         except (ValueError, TypeError):
             return text
 
-    return is_routable, override_default, parse_override, render_action
+    return is_routable, parse_override, render_action
 
 
 # ── Detection tab ────────────────────────────────────────────────────────
@@ -381,16 +367,7 @@ def expert_detection_controls(
         disabled=not llm_enabled or not _types,
     )
     _controls_view = (
-        mo.vstack([
-            mo.md(
-                "Pick an object type and judge **every** instance of it for "
-                "an incorrect `ocel_type`. One LLM call per object — large "
-                "types may take a while; flagged rows appear below with "
-                "rationale + confidence. Click **Agree** to confirm a flag "
-                "for the Resolution tab, or **Reject** to drop it."
-            ),
-            mo.hstack([type_picker, detect_btn], justify="start", gap=1),
-        ], gap=0.5)
+        mo.hstack([type_picker, detect_btn], justify="start", gap=1)
         if expert_tab.value == "Detection"
         else mo.md("")
     )
@@ -512,14 +489,7 @@ def expert_detection_render(
                 "_Click **Run detection** to start a sweep._"
             )
         else:
-            cards = [
-                mo.md(
-                    "_**Agree** stages this flag for the **Resolution** tab — "
-                    "open it to review the SQL and click **Apply (commit)** to "
-                    "actually update the database. **Reject** hides the card "
-                    "for this sweep._"
-                ).callout(kind="info"),
-            ]
+            cards = []
             current_flags = get_flags()
             for _i, _prop in enumerate(proposals):
                 _row = _prop["row"]
@@ -662,32 +632,19 @@ def expert_row_picker(expert_tab, mo, res_rows):
 @app.cell
 def expert_buttons(expert_tab, llm_enabled, mo):
     ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
-    apply_dryrun_btn = mo.ui.run_button(label="Apply (dry-run)")
-    apply_commit_btn = mo.ui.run_button(label="Apply (commit)", kind="danger")
-    override_dryrun_btn = mo.ui.run_button(label="Apply override (dry-run)")
-    override_commit_btn = mo.ui.run_button(label="Apply override (commit)", kind="danger")
+    dry_run_toggle = mo.ui.switch(value=True, label="Dry run")
+    apply_btn = mo.ui.run_button(label="Apply", kind="danger")
     _buttons_view = (
         mo.hstack(
-            [
-                ask_btn,
-                apply_dryrun_btn,
-                apply_commit_btn,
-                override_dryrun_btn,
-                override_commit_btn,
-            ],
+            [ask_btn, dry_run_toggle, apply_btn],
             justify="start",
+            gap=0.75,
         )
         if expert_tab.value == "Resolution"
         else mo.md("")
     )
     _buttons_view
-    return (
-        apply_commit_btn,
-        apply_dryrun_btn,
-        ask_btn,
-        override_commit_btn,
-        override_dryrun_btn,
-    )
+    return apply_btn, ask_btn, dry_run_toggle
 
 
 @app.cell
@@ -698,7 +655,6 @@ def expert_suggest(
     is_routable,
     llm_enabled,
     mo,
-    override_default,
     render_action,
     res_rows,
     row_picker,
@@ -727,21 +683,12 @@ def expert_suggest(
                 action_view = render_action(suggestion)
                 if is_routable(suggestion):
                     override_input = mo.ui.text(
-                        value=override_default(suggestion),
-                        label="Override value (JSON or raw text)",
+                        value="",
+                        label="Override (empty = use suggestion; JSON or raw text)",
                         full_width=True,
                     )
                     suggest_view = mo.vstack(
-                        [
-                            action_view,
-                            mo.md(
-                                "_Edit the value below and click **Apply override**. "
-                                "JSON literals (`42`, `\"abc\"`, `null`) are parsed; anything "
-                                "else is treated as a raw string. Overrides are type-checked "
-                                "against the column's SQL affinity._"
-                            ),
-                            override_input,
-                        ],
+                        [action_view, override_input],
                         gap=0.5,
                     )
                 else:
@@ -755,15 +702,13 @@ def expert_suggest(
 
 @app.cell
 def expert_apply(
-    apply_commit_btn,
-    apply_dryrun_btn,
+    apply_btn,
     apply_repair,
     detector,
+    dry_run_toggle,
     expert_tab,
     get_flags,
     mo,
-    override_commit_btn,
-    override_dryrun_btn,
     override_input,
     parse_override,
     res_rows,
@@ -790,63 +735,37 @@ def expert_apply(
             set_flags(_current)
 
     apply_view = None
-    if expert_tab.value == "Resolution":
+    if expert_tab.value == "Resolution" and apply_btn.value:
         if suggestion is None:
-            if (
-                apply_dryrun_btn.value
-                or apply_commit_btn.value
-                or override_dryrun_btn.value
-                or override_commit_btn.value
-            ):
-                apply_view = mo.md("_Run the domain expert first._")
-        elif apply_commit_btn.value:
+            apply_view = mo.md("_Run the domain expert first._")
+        else:
+            # Empty override input -> use the LLM suggestion as-is.
+            # Non-empty -> parse and pass to apply_repair as override_value.
+            _raw = override_input.value if override_input is not None else ""
+            _use_override = _raw.strip() != ""
+            _parsed = parse_override(_raw) if _use_override else None
+            _dry = dry_run_toggle.value
             try:
-                _msg = apply_repair(sqlite_path, suggestion, dry_run=False)
+                _msg = apply_repair(
+                    sqlite_path, suggestion,
+                    dry_run=_dry,
+                    override_value=_parsed,
+                )
+                _kind = "info" if _dry else "success"
+                _prefix = "" if _dry else "✅\n\n"
+                _suffix = (
+                    ""
+                    if _dry
+                    else "\n\nClick **Re-run detection** above to refresh the tables."
+                )
                 apply_view = mo.md(
-                    f"✅\n\n```sql\n{_msg}\n```\n\nClick **Re-run detection** above to refresh the tables."
-                ).callout(kind="success")
-                _drop_confirmed_flag_if_needed()
+                    f"{_prefix}```sql\n{_msg}\n```{_suffix}"
+                ).callout(kind=_kind)
+                if not _dry:
+                    _drop_confirmed_flag_if_needed()
             except Exception as e:
                 apply_view = mo.md(f"❌ Apply failed: `{e}`").callout(kind="danger")
-        elif apply_dryrun_btn.value:
-            try:
-                _msg = apply_repair(sqlite_path, suggestion, dry_run=True)
-                apply_view = mo.md(f"```sql\n{_msg}\n```").callout(kind="info")
-            except Exception as e:
-                apply_view = mo.md(f"❌ Render failed: `{e}`").callout(kind="danger")
-        elif override_commit_btn.value or override_dryrun_btn.value:
-            if override_input is None:
-                apply_view = mo.md(
-                    "_This action has no routable target; override is not available._"
-                ).callout(kind="warn")
-            else:
-                _parsed = parse_override(override_input.value)
-                _dry = override_dryrun_btn.value and not override_commit_btn.value
-                try:
-                    _msg = apply_repair(
-                        sqlite_path, suggestion, dry_run=_dry, override_value=_parsed
-                    )
-                    _kind = "info" if _dry else "success"
-                    _prefix = "" if _dry else "✅\n\n"
-                    _suffix = (
-                        ""
-                        if _dry
-                        else "\n\nClick **Re-run detection** above to refresh the tables."
-                    )
-                    apply_view = mo.md(
-                        f"{_prefix}```sql\n{_msg}\n```{_suffix}"
-                    ).callout(kind=_kind)
-                    if not _dry:
-                        _drop_confirmed_flag_if_needed()
-                except Exception as e:
-                    apply_view = mo.md(f"❌ Override failed: `{e}`").callout(kind="danger")
     apply_view
-    return
-
-
-@app.cell
-def expert_tabs_view(expert_tab):
-    expert_tab
     return
 
 
