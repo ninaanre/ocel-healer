@@ -473,27 +473,45 @@ def expert_detection_sweep(
 
 
 @app.cell
+def expert_detection_buttons(mo, proposals):
+    # Create the Agree/Reject button arrays in their own cell. The render
+    # cell below needs to read `reject_array[i].value` to hide rejected
+    # cards, and marimo forbids reading a UIElement's value in the cell
+    # that created it — so creation lives here, reads live downstream.
+    if proposals:
+        n = len(proposals)
+        agree_array = mo.ui.array([
+            mo.ui.button(value=0, on_click=lambda v: v + 1, label="Agree")
+            for _ in range(n)
+        ])
+        reject_array = mo.ui.array([
+            mo.ui.button(value=0, on_click=lambda v: v + 1, label="Reject")
+            for _ in range(n)
+        ])
+    else:
+        agree_array = None
+        reject_array = None
+    return agree_array, reject_array
+
+
+@app.cell
 def expert_detection_render(
-    expert_tab, get_flags, mo, proposals, set_flags, sqlite_path, sweep_summary,
+    agree_array,
+    expert_tab,
+    get_flags,
+    mo,
+    proposals,
+    reject_array,
+    sqlite_path,
+    sweep_summary,
 ):
     detection_view = None
-    agree_array = None
-    reject_array = None
     if expert_tab.value == "Detection":
         if not proposals:
             detection_view = sweep_summary or mo.md(
                 "_Click **Run detection** to start a sweep._"
             )
         else:
-            n = len(proposals)
-            agree_array = mo.ui.array([
-                mo.ui.button(value=0, on_click=lambda v: v + 1, label="Agree")
-                for _ in range(n)
-            ])
-            reject_array = mo.ui.array([
-                mo.ui.button(value=0, on_click=lambda v: v + 1, label="Reject")
-                for _ in range(n)
-            ])
             cards = [
                 mo.md(
                     "_**Agree** stages this flag for the **Resolution** tab — "
@@ -545,7 +563,8 @@ def expert_detection_render(
             detection_view = mo.vstack([sweep_summary, *cards], gap=0.5)
 
     detection_view
-    return agree_array, reject_array
+    return
+
 
 @app.cell
 def expert_detection_agree(
