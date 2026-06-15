@@ -1,10 +1,10 @@
 from src.detection.error_detection import _column_info
 from src.llm.actions import ActionResult, object_attribute_target
 from src.llm.sql_utils import quote, table_for_type
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
-class DuplicateObjectsOnAttributes(IssueTask):
+class DuplicateObjectsOnAttributes(ResolutionTask):
     issue_key = "duplicate_objects_on_attributes"
 
     PROMPT = """\

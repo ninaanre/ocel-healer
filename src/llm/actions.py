@@ -176,7 +176,7 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
 
 # --- Type-affinity coercion (for the apply path) --------------------------
 # Used only by apply_repair when the user supplies an override; ensures we
-# don't silently re-introduce a `wrong_attribute_datatype` violation via the
+# don't silently re-introduce a `incorrect_attribute_datatype` violation via the
 # fix path. Mirrors the buckets used by the detector's _value_matches_type.
 
 def _column_affinity(conn: sqlite3.Connection, table: str, column: str) -> str:

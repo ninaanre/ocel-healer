@@ -8,8 +8,18 @@ def imports():
     import os
     import marimo as mo
     from pathlib import Path
-    from src.detection.error_detection import detect_all
-    from src.llm import apply_repair, ollama_ready, suggest_repair, MODEL
+    from src.detection.error_detection import (
+        _connect as connect_sqlite,
+        _object_type_tables as object_type_tables,
+        detect_all,
+    )
+    from src.llm import (
+        MODEL,
+        apply_repair,
+        detect_all_with_llm,
+        ollama_ready,
+        suggest_repair,
+    )
 
     # Resolve the project root once so the dashboard works from any cwd.
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,8 +28,11 @@ def imports():
         DATA_DIR,
         MODEL,
         apply_repair,
+        connect_sqlite,
         detect_all,
+        detect_all_with_llm,
         mo,
+        object_type_tables,
         ollama_ready,
         os,
         suggest_repair,
@@ -234,7 +247,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
     attr_section = _section("Attributes", [
         ("Missing values",   "missing_attribute_value",   results["missing_attribute_value"],   _bad_col("actual_value")),
-        ("Wrong datatypes",  "wrong_attribute_datatype",  results["wrong_attribute_datatype"],  _bad_col("actual_value")),
+        ("Incorrect datatypes",  "incorrect_attribute_datatype",  results["incorrect_attribute_datatype"],  _bad_col("actual_value")),
     ])
 
     obj_section = _section("Objects", [
@@ -266,87 +279,45 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
 
 
 @app.cell
-def expert_header(mo):
-    mo.md("""
-    ---
-    ## Domain Expert (LLM)
-    Pick a detector and a violation row, then ask the LLM to suggest a
-    repair. Suggestions are dry-run by default — review the SQL before
-    committing.
-    """)
-    return
-
-
-@app.cell
-def expert_pickers(mo, results):
-    # Only offer detectors that actually have violations to act on.
-    available = [k for k, df in results.items() if df.height > 0]
-    detector = mo.ui.dropdown(
-        options=available, value=(available[0] if available else None),
-        label="Detector",
+def expert_header_and_tabs(mo):
+    # Render the header and the Detection/Resolution tab strip together so
+    # the switcher sits immediately under the section title — downstream
+    # cells gated on `expert_tab.value` only fill the active tab body.
+    expert_tab = mo.ui.tabs(
+        {
+            "Detection": mo.md(""),  # bodies are filled in by downstream cells
+            "Resolution": mo.md(""),
+        },
+        value="Detection",
     )
-    detector
-    return (detector,)
+    mo.vstack([
+        mo.md("""
+        ---
+        ## Domain Expert (LLM)
+        _Detection flags suspicious rows; Resolution proposes and applies repairs._
+        """),
+        expert_tab,
+    ], gap=0.5)
+    return (expert_tab,)
 
 
 @app.cell
-def expert_row_picker(detector, mo, results):
-    if detector.value is None:
-        row_picker = mo.md("_No violations to pick from._")
-    else:
-        _df = results[detector.value]
-        _labels = []
-        for _i, _row in enumerate(_df.iter_rows(named=True)):
-            _keys = [k for k in ("ocel_id", "ocel_event_id", "ocel_source_id", "ocel_ids") if k in _row]
-            _preview = ", ".join(f"{k}={_row[k]}" for k in _keys[:2]) or f"row {_i}"
-            _labels.append(f"#{_i}  {_preview}")
-        row_picker = mo.ui.dropdown(
-            options=dict(zip(_labels, range(len(_labels)))),
-            value=_labels[0] if _labels else None,
-            label="Violation",
-        )
-    row_picker
-    return (row_picker,)
+def expert_state(mo):
+    # Confirmed `incorrect_object_type` flags, scoped to (sqlite_path, ocel_id).
+    # In-memory only -- lost when the dashboard restarts. Each value is the
+    # row dict (ocel_id + ocel_type + issue) so the Resolution tab can hand
+    # it back to suggest_repair without rebuilding it.
+    get_flags, set_flags = mo.state({})
+    return get_flags, set_flags
 
 
 @app.cell
-def expert_buttons(llm_enabled, mo):
-    ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
-    apply_dryrun_btn = mo.ui.run_button(label="Apply (dry-run)")
-    apply_commit_btn = mo.ui.run_button(label="Apply (commit)", kind="danger")
-    override_dryrun_btn = mo.ui.run_button(label="Apply override (dry-run)")
-    override_commit_btn = mo.ui.run_button(label="Apply override (commit)", kind="danger")
-    mo.hstack(
-        [
-            ask_btn,
-            apply_dryrun_btn,
-            apply_commit_btn,
-            override_dryrun_btn,
-            override_commit_btn,
-        ],
-        justify="start",
-    )
-    return (
-        apply_commit_btn,
-        apply_dryrun_btn,
-        ask_btn,
-        override_commit_btn,
-        override_dryrun_btn,
-    )
+def expert_helpers(mo):
+    # Shared helpers used by both tabs. Defined once here so both downstream
+    # cells can render action cards / parse override input consistently.
+    import json as _json
 
-
-@app.cell
-def expert_suggest(
-    ask_btn,
-    detector,
-    llm_enabled,
-    mo,
-    results,
-    row_picker,
-    sqlite_path,
-    suggest_repair,
-):
-    def _render(action):
+    def render_action(action):
         if action["kind"] == "noop":
             return mo.md(
                 f"**No-op suggestion** (confidence {action['confidence']:.2f}).\n\n"
@@ -380,91 +351,14 @@ def expert_suggest(
             f"{confidence_bar}</div>"
         )
 
-    def _is_routable(action):
-        # An override can be applied iff the action carries a target_table +
-        # column + non-empty target_pk. Successful updates qualify; so do
-        # decline/suppressed noops that we annotated with a target.
+    def is_routable(action):
         return (
             action.get("target_table")
             and action.get("column")
             and action.get("target_pk")
         )
 
-    def _override_default(action):
-        proposed = action.get("proposed_value")
-        if proposed is None:
-            # Fall back to the LLM's new_value for plain `update` actions.
-            proposed = action.get("new_value")
-        if proposed is None:
-            return ""
-        # Pre-fill in JSON form so quotes/types are explicit -- the apply cell
-        # parses with json.loads first, then falls back to the raw string.
-        try:
-            import json as _json
-            return _json.dumps(proposed)
-        except (TypeError, ValueError):
-            return str(proposed)
-
-    suggestion = None
-    override_input = None
-    suggest_view = None
-    if not llm_enabled:
-        suggest_view = mo.md("_Enable Ollama to use the domain expert._")
-    elif ask_btn.value and detector.value is not None and getattr(row_picker, "value", None) is not None:
-        _df = results[detector.value]
-        _idx = row_picker.value
-        if _idx is None or _idx >= _df.height:
-            suggest_view = mo.md("_Pick a violation row first._")
-        else:
-            _row = dict(_df.row(_idx, named=True))
-            try:
-                suggestion = suggest_repair(detector.value, _row, sqlite_path)
-                action_view = _render(suggestion)
-                if _is_routable(suggestion):
-                    override_input = mo.ui.text(
-                        value=_override_default(suggestion),
-                        label="Override value (JSON or raw text)",
-                        full_width=True,
-                    )
-                    suggest_view = mo.vstack(
-                        [
-                            action_view,
-                            mo.md(
-                                "_Edit the value below and click **Apply override**. "
-                                "JSON literals (`42`, `\"abc\"`, `null`) are parsed; anything "
-                                "else is treated as a raw string. Overrides are type-checked "
-                                "against the column's SQL affinity._"
-                            ),
-                            override_input,
-                        ],
-                        gap=0.5,
-                    )
-                else:
-                    suggest_view = action_view
-            except Exception as e:
-                suggest_view = mo.md(f"❌ LLM call failed: `{e}`").callout(kind="danger")
-    suggest_view
-    return override_input, suggestion
-
-
-@app.cell
-def expert_apply(
-    apply_commit_btn,
-    apply_dryrun_btn,
-    apply_repair,
-    mo,
-    override_commit_btn,
-    override_dryrun_btn,
-    override_input,
-    sqlite_path,
-    suggestion,
-):
-    import json as _json
-
-    def _parse_override(text: str):
-        # Try JSON first (so `42`, `"abc"`, `null`, `true` parse to typed
-        # values). On failure fall back to the raw string -- friendlier than
-        # forcing valid JSON for a plain text edit.
+    def parse_override(text):
         if text is None:
             return None
         stripped = text.strip()
@@ -475,39 +369,418 @@ def expert_apply(
         except (ValueError, TypeError):
             return text
 
-    apply_view = None
-    if suggestion is None:
-        if (
-            apply_dryrun_btn.value
-            or apply_commit_btn.value
-            or override_dryrun_btn.value
-            or override_commit_btn.value
-        ):
-            apply_view = mo.md("_Run the domain expert first._")
-    elif apply_commit_btn.value:
-        try:
-            _msg = apply_repair(sqlite_path, suggestion, dry_run=False)
-            apply_view = mo.md(f"✅\n\n```sql\n{_msg}\n```\n\nClick **Re-run detection** above to refresh the tables.").callout(kind="success")
-        except Exception as e:
-            apply_view = mo.md(f"❌ Apply failed: `{e}`").callout(kind="danger")
-    elif apply_dryrun_btn.value:
-        try:
-            _msg = apply_repair(sqlite_path, suggestion, dry_run=True)
-            apply_view = mo.md(f"```sql\n{_msg}\n```").callout(kind="info")
-        except Exception as e:
-            apply_view = mo.md(f"❌ Render failed: `{e}`").callout(kind="danger")
-    elif override_commit_btn.value or override_dryrun_btn.value:
-        if override_input is None:
-            apply_view = mo.md(
-                "_This action has no routable target; override is not available._"
+    return is_routable, parse_override, render_action
+
+
+# ── Detection tab ────────────────────────────────────────────────────────
+
+@app.cell
+def expert_detection_controls(
+    object_type_tables, connect_sqlite, expert_tab, llm_enabled, mo, sqlite_path,
+):
+    # One-type-at-a-time sweep: pick a type, judge every instance of it.
+    # Loading the dropdown options is cheap (a single SELECT on object_map_type)
+    # so we always do it; the button stays disabled until LLM + a type are ready.
+    with connect_sqlite(sqlite_path) as _conn:
+        _types = [t for t, _ in object_type_tables(_conn)]
+    type_picker = mo.ui.dropdown(
+        options=_types,
+        label="Object type",
+        searchable=True,
+    )
+    detect_btn = mo.ui.run_button(
+        label="Run detection on selected type",
+        disabled=not llm_enabled or not _types,
+    )
+    _controls_view = (
+        mo.hstack([type_picker, detect_btn], justify="start", gap=1)
+        if expert_tab.value == "Detection"
+        else mo.md("")
+    )
+    _controls_view
+    return detect_btn, type_picker
+
+
+@app.cell
+def expert_detection_sweep(
+    connect_sqlite,
+    detect_all_with_llm,
+    detect_btn,
+    expert_tab,
+    mo,
+    sqlite_path,
+    type_picker,
+):
+    # Run the sweep when the button has been clicked. Only fires when the
+    # Detection tab is active so switching to Resolution doesn't re-run.
+    # Pulls every ocel_id of the chosen type and judges each one; progress
+    # bar shows running flagged count so big sweeps stay legible.
+    proposals: list = []
+    sweep_summary = None
+    if (
+        expert_tab.value == "Detection"
+        and detect_btn.value
+        and type_picker.value
+    ):
+        chosen_type = type_picker.value
+        with connect_sqlite(sqlite_path) as _conn:
+            _ids = _conn.execute(
+                "SELECT ocel_id FROM object "
+                "WHERE ocel_type = ? AND ocel_id IS NOT NULL "
+                "ORDER BY ocel_id",
+                (chosen_type,),
+            ).fetchall()
+        candidates = [
+            {"ocel_id": _oid, "ocel_type": chosen_type, "issue": "incorrect_object_type"}
+            for (_oid,) in _ids
+        ]
+        total = len(candidates)
+        if total == 0:
+            sweep_summary = mo.md(
+                f"No objects found for type **`{chosen_type}`**."
             ).callout(kind="warn")
+            verdicts: list = []
         else:
-            _parsed = _parse_override(override_input.value)
-            _dry = override_dryrun_btn.value and not override_commit_btn.value
-            try:
-                _msg = apply_repair(
-                    sqlite_path, suggestion, dry_run=_dry, override_value=_parsed
+            flagged_count = [0]  # boxed so the progress callback can mutate it
+
+            def _on_progress(i, _total, _row, verdict, bar):
+                if verdict.flagged:
+                    flagged_count[0] += 1
+                bar.update(
+                    increment=1,
+                    subtitle=f"{i}/{_total} judged · {flagged_count[0]} flagged so far",
                 )
+
+            with mo.status.progress_bar(
+                total=total,
+                title=f"Judging {total} `{chosen_type}` object(s)…",
+                subtitle=f"0/{total} judged · 0 flagged so far",
+            ) as _bar:
+                verdicts = detect_all_with_llm(
+                    "incorrect_object_type",
+                    candidates,
+                    sqlite_path,
+                    on_progress=lambda i, t, r, v: _on_progress(i, t, r, v, _bar),
+                )
+            for _row, _verdict in verdicts:
+                if _verdict.flagged:
+                    proposals.append({
+                        "row": dict(_row),
+                        "verdict": _verdict,
+                    })
+            sweep_summary = mo.md(
+                f"Judged **{len(verdicts)}** `{chosen_type}` object(s) → "
+                f"**{len(proposals)}** proposed flag(s)."
+            ).callout(kind="info" if proposals else "success")
+    return proposals, sweep_summary
+
+
+@app.cell
+def expert_detection_buttons(mo, proposals):
+    # Create the Agree/Reject button arrays in their own cell. The render
+    # cell below needs to read `reject_array[i].value` to hide rejected
+    # cards, and marimo forbids reading a UIElement's value in the cell
+    # that created it — so creation lives here, reads live downstream.
+    if proposals:
+        n = len(proposals)
+        agree_array = mo.ui.array([
+            mo.ui.button(value=0, on_click=lambda v: v + 1, label="Agree")
+            for _ in range(n)
+        ])
+        reject_array = mo.ui.array([
+            mo.ui.button(value=0, on_click=lambda v: v + 1, label="Reject")
+            for _ in range(n)
+        ])
+    else:
+        agree_array = None
+        reject_array = None
+    return agree_array, reject_array
+
+
+@app.cell
+def expert_detection_render(
+    agree_array,
+    expert_tab,
+    get_flags,
+    mo,
+    proposals,
+    reject_array,
+    sqlite_path,
+    sweep_summary,
+):
+    detection_view = None
+    if expert_tab.value == "Detection":
+        if not proposals:
+            detection_view = sweep_summary or mo.md(
+                "_Click **Run detection** to start a sweep._"
+            )
+        else:
+            cards = []
+            current_flags = get_flags()
+            for _i, _prop in enumerate(proposals):
+                _row = _prop["row"]
+                _v = _prop["verdict"]
+                _ocel_id = _row["ocel_id"]
+                _key = (sqlite_path, _ocel_id)
+                # User clicked Reject on this card — hide it for this sweep.
+                # (Reject is transient; rerunning the sweep can resurface it.)
+                if reject_array[_i].value:
+                    continue
+                _already = _key in current_flags
+                _bar_pct = int(round(_v.confidence * 100))
+                _header = mo.Html(
+                    "<div style='font-family:system-ui; padding:6px 0;'>"
+                    f"<div><b>ocel_id:</b> <code>{_ocel_id}</code></div>"
+                    f"<div style='margin:4px 0'>"
+                    f"<b>Current:</b> <span style='background:#fde2e2; color:#b00020; "
+                    f"padding:1px 6px; border-radius:3px;'>{_row.get('ocel_type')}</span>"
+                    f" &nbsp;→&nbsp; "
+                    f"<b>Suggested:</b> <span style='background:#e6ffec; color:#1a7f37; "
+                    f"padding:1px 6px; border-radius:3px;'>{_v.suggested_value}</span>"
+                    f"</div>"
+                    f"<div><b>Rationale:</b> {_v.rationale}</div>"
+                    f"<div style='margin-top:4px'><b>Confidence:</b> {_v.confidence:.2f}"
+                    f" <span style='display:inline-block; background:#eee; border-radius:4px; "
+                    f"width:160px; height:8px; vertical-align:middle; margin-left:6px;'>"
+                    f"<span style='display:block; background:#0969da; width:{_bar_pct}%; "
+                    f"height:8px; border-radius:4px;'></span></span></div>"
+                    "</div>"
+                )
+                if _already:
+                    _controls = mo.md("**Confirmed** — see Resolution tab.").callout(kind="success")
+                else:
+                    _controls = mo.hstack(
+                        [agree_array[_i], reject_array[_i]],
+                        justify="start",
+                        gap=0.5,
+                    )
+                cards.append(mo.vstack([_header, _controls], gap=0.25))
+                cards.append(mo.md("---"))
+            detection_view = mo.vstack([sweep_summary, *cards], gap=0.5)
+
+    detection_view
+    return
+
+
+@app.cell
+def expert_detection_agree(
+    agree_array, get_flags, proposals, set_flags, sqlite_path,
+):
+    if proposals and agree_array is not None:
+        current = dict(get_flags())
+        changed = False
+        for _i, _prop in enumerate(proposals):
+            _row = _prop["row"]
+            _v = _prop["verdict"]
+            _key = (sqlite_path, _row["ocel_id"])
+            if agree_array[_i].value and _key not in current:
+                current[_key] = {
+                    "ocel_id": _row["ocel_id"],
+                    "ocel_type": _row.get("ocel_type"),
+                    "issue": "incorrect_object_type",
+                    "_detected_suggestion": _v.suggested_value,
+                    "_detected_rationale": _v.rationale,
+                    "_detected_confidence": _v.confidence,
+                }
+                changed = True
+        if changed:
+            set_flags(current)
+    return
+
+
+# ── Resolution tab ───────────────────────────────────────────────────────
+
+@app.cell
+def expert_pickers(expert_tab, get_flags, mo, results, sqlite_path):
+    # In Resolution mode, expose every detector that has rows to act on,
+    # PLUS `incorrect_object_type` if the user has confirmed any flags.
+    # Sorted alphabetically so the dropdown order is stable / predictable.
+    available = sorted(
+        k for k, df in results.items()
+        if df.height > 0 and k != "incorrect_object_type"
+    )
+    n_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
+    if n_confirmed > 0:
+        available.append("incorrect_object_type")
+        available.sort()
+    detector = mo.ui.dropdown(
+        options=available, value=(available[0] if available else None),
+        label="Issue type",
+    )
+    if expert_tab.value != "Resolution":
+        _pickers_view = mo.md("")
+    elif not available:
+        _pickers_view = mo.md(
+            "_No violations to resolve. Run the deterministic "
+            "detectors or the Detection tab first._"
+        )
+    else:
+        _pickers_view = detector
+    _pickers_view
+    return (detector,)
+
+
+@app.cell
+def expert_resolution_rows(detector, get_flags, results, sqlite_path):
+    # Resolution row source: confirmed flags for incorrect_object_type,
+    # detector results otherwise. Returns a list of row-dicts so both
+    # branches use the same downstream picker.
+    res_rows: list = []
+    if detector.value == "incorrect_object_type":
+        for (path, _ocel_id), entry in get_flags().items():
+            if path == sqlite_path:
+                # Strip the underscore-prefixed display-only metadata before
+                # handing the row to suggest_repair / apply_repair.
+                res_rows.append({
+                    k: v for k, v in entry.items() if not k.startswith("_")
+                })
+    elif detector.value is not None:
+        df = results[detector.value]
+        res_rows = [dict(r) for r in df.iter_rows(named=True)]
+    return (res_rows,)
+
+
+@app.cell
+def expert_row_picker(expert_tab, mo, res_rows):
+    if not res_rows:
+        row_picker = mo.md("_No rows to pick from._")
+    else:
+        labels = []
+        for _i, _row in enumerate(res_rows):
+            _keys = [k for k in ("ocel_id", "ocel_event_id", "ocel_source_id", "ocel_ids") if k in _row]
+            _preview = ", ".join(f"{k}={_row[k]}" for k in _keys[:2]) or f"row {_i}"
+            labels.append(f"#{_i}  {_preview}")
+        row_picker = mo.ui.dropdown(
+            options=dict(zip(labels, range(len(labels)))),
+            value=labels[0] if labels else None,
+            label="Row",
+        )
+    _row_picker_view = row_picker if expert_tab.value == "Resolution" else mo.md("")
+    _row_picker_view
+    return (row_picker,)
+
+
+@app.cell
+def expert_buttons(expert_tab, llm_enabled, mo):
+    ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
+    dry_run_toggle = mo.ui.switch(value=True, label="Dry run")
+    apply_btn = mo.ui.run_button(label="Apply", kind="danger")
+    _buttons_view = (
+        mo.hstack(
+            [ask_btn, dry_run_toggle, apply_btn],
+            justify="start",
+            gap=0.75,
+        )
+        if expert_tab.value == "Resolution"
+        else mo.md("")
+    )
+    _buttons_view
+    return apply_btn, ask_btn, dry_run_toggle
+
+
+@app.cell
+def expert_suggest(
+    ask_btn,
+    detector,
+    expert_tab,
+    is_routable,
+    llm_enabled,
+    mo,
+    render_action,
+    res_rows,
+    row_picker,
+    sqlite_path,
+    suggest_repair,
+):
+    suggestion = None
+    override_input = None
+    suggest_view = None
+    if expert_tab.value != "Resolution":
+        pass  # only Resolution tab drives this cell
+    elif not llm_enabled:
+        suggest_view = mo.md("_Enable Ollama to use the domain expert._")
+    elif (
+        ask_btn.value
+        and detector.value is not None
+        and getattr(row_picker, "value", None) is not None
+    ):
+        idx = row_picker.value
+        if idx is None or idx >= len(res_rows):
+            suggest_view = mo.md("_Pick a row first._")
+        else:
+            _row = res_rows[idx]
+            try:
+                suggestion = suggest_repair(detector.value, _row, sqlite_path)
+                action_view = render_action(suggestion)
+                if is_routable(suggestion):
+                    override_input = mo.ui.text(
+                        value="",
+                        label="Override (empty = use suggestion; JSON or raw text)",
+                        full_width=True,
+                    )
+                    suggest_view = mo.vstack(
+                        [action_view, override_input],
+                        gap=0.5,
+                    )
+                else:
+                    suggest_view = action_view
+            except Exception as e:
+                suggest_view = mo.md(f"❌ LLM call failed: `{e}`").callout(kind="danger")
+    _suggest_outer = suggest_view if expert_tab.value == "Resolution" else mo.md("")
+    _suggest_outer
+    return override_input, suggestion
+
+
+@app.cell
+def expert_apply(
+    apply_btn,
+    apply_repair,
+    detector,
+    dry_run_toggle,
+    expert_tab,
+    get_flags,
+    mo,
+    override_input,
+    parse_override,
+    res_rows,
+    row_picker,
+    set_flags,
+    sqlite_path,
+    suggestion,
+):
+    def _drop_confirmed_flag_if_needed():
+        """After committing a fix on an `incorrect_object_type` confirmed
+        flag, remove it from the in-memory store so the Resolution tab
+        refreshes. No-op for any other detector."""
+        if detector.value != "incorrect_object_type":
+            return
+        _idx = getattr(row_picker, "value", None)
+        if _idx is None or _idx >= len(res_rows):
+            return
+        _oid = res_rows[_idx].get("ocel_id")
+        if _oid is None:
+            return
+        _current = dict(get_flags())
+        if (sqlite_path, _oid) in _current:
+            del _current[(sqlite_path, _oid)]
+            set_flags(_current)
+
+    apply_view = None
+    if expert_tab.value == "Resolution" and apply_btn.value:
+        if suggestion is None:
+            apply_view = mo.md("_Run the domain expert first._")
+        else:
+            # Empty override input -> call apply_repair WITHOUT override_value
+            # so it uses the LLM suggestion's new_value. Passing
+            # override_value=None would be interpreted as "set the column to
+            # NULL" because apply_repair uses a sentinel to detect "unset".
+            _raw = override_input.value if override_input is not None else ""
+            _dry = dry_run_toggle.value
+            _kwargs = {"dry_run": _dry}
+            if _raw.strip() != "":
+                _kwargs["override_value"] = parse_override(_raw)
+            try:
+                _msg = apply_repair(sqlite_path, suggestion, **_kwargs)
                 _kind = "info" if _dry else "success"
                 _prefix = "" if _dry else "✅\n\n"
                 _suffix = (
@@ -518,8 +791,10 @@ def expert_apply(
                 apply_view = mo.md(
                     f"{_prefix}```sql\n{_msg}\n```{_suffix}"
                 ).callout(kind=_kind)
+                if not _dry:
+                    _drop_confirmed_flag_if_needed()
             except Exception as e:
-                apply_view = mo.md(f"❌ Override failed: `{e}`").callout(kind="danger")
+                apply_view = mo.md(f"❌ Apply failed: `{e}`").callout(kind="danger")
     apply_view
     return
 

@@ -1,8 +1,8 @@
 from src.llm.actions import ActionResult
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
-class DuplicateObjectsOnIds(IssueTask):
+class DuplicateObjectsOnIds(ResolutionTask):
     issue_key = "duplicate_objects_on_ids"
     min_confidence = 0.0  # deterministic path ignores LLM confidence
 
