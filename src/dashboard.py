@@ -243,12 +243,25 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
         ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
     ])
 
-    rel_section = _section("Relationships", [
+    rel_checks = [
         ("Object → Object", "dangling_o2o_relationship", results["dangling_o2o_relationship"], _bad_o2o),
         ("Event → Object",  "dangling_e2o_relationship", results["dangling_e2o_relationship"], _bad_e2o),
-    ])
+    ]
+    rel_pills = "".join(
+        f'<span style="color:{MUTED}; font-size:13px; margin-right:14px;">'
+        f'{label}&nbsp;{_badge(df.height)}</span>'
+        for label, _key, df, _ in rel_checks
+    )
+    rel_heading = mo.Html(
+        f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; margin:28px 0 0 0;">'
+        f'<span style="font-size:15px; font-weight:700; color:#1f2328;">Relationships</span>'
+        f'<div style="margin-top:4px;">{rel_pills}</div>'
+        f'</div>'
+    )
+    rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
+    rel_section = mo.vstack([rel_heading, mo.accordion({"Show tables": rel_tabs})], gap=0)
 
-    mo.vstack([attr_section, obj_section, rel_section], gap=0)
+    mo.vstack([obj_section, attr_section, rel_section], gap=0)
     return
 
 
@@ -340,6 +353,23 @@ def expert_suggest(
                 f"Rationale: {action['rationale']}"
             ).callout(kind="info")
         bar_pct = int(round(action["confidence"] * 100))
+        confidence_bar = (
+            f"<div style='margin-top:6px'><b>Confidence:</b> {action['confidence']:.2f}"
+            f" <div style='display:inline-block; background:#eee; border-radius:4px; "
+            f"width:200px; height:10px; vertical-align:middle; margin-left:8px;'>"
+            f"<div style='background:#0969da; width:{bar_pct}%; height:10px; border-radius:4px;'></div>"
+            f"</div></div>"
+        )
+        if action["kind"] == "delete":
+            pk_str = ", ".join(f"{k}={v!r}" for k, v in action["target_pk"].items())
+            return mo.Html(
+                f"<div style='font-family:system-ui'>"
+                f"<div><b>Kind:</b> delete &nbsp; <b>Table:</b> {action['target_table']}</div>"
+                f"<div style='margin:6px 0'><b>Where:</b> <code>{pk_str}</code></div>"
+                f"<div style='margin:4px 0; color:#cf222e;'>Keeps the first row (MIN rowid), deletes all duplicates.</div>"
+                f"<div><b>Rationale:</b> {action['rationale']}</div>"
+                f"{confidence_bar}</div>"
+            )
         return mo.Html(
             f"<div style='font-family:system-ui'>"
             f"<div><b>Kind:</b> {action['kind']} &nbsp; <b>Table:</b> {action['target_table']} "
@@ -347,11 +377,7 @@ def expert_suggest(
             f"<div style='margin:6px 0'><b>Old →</b> <code>{action['old_value']!r}</code> "
             f"&nbsp; <b>New →</b> <code>{action['new_value']!r}</code></div>"
             f"<div><b>Rationale:</b> {action['rationale']}</div>"
-            f"<div style='margin-top:6px'><b>Confidence:</b> {action['confidence']:.2f}"
-            f" <div style='display:inline-block; background:#eee; border-radius:4px; "
-            f"width:200px; height:10px; vertical-align:middle; margin-left:8px;'>"
-            f"<div style='background:#0969da; width:{bar_pct}%; height:10px; border-radius:4px;'></div>"
-            f"</div></div></div>"
+            f"{confidence_bar}</div>"
         )
 
     def _is_routable(action):

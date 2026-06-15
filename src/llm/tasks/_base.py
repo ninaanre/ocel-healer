@@ -23,6 +23,7 @@ class IssueTask(ABC):
 
     issue_key: ClassVar[str] = ""
     PROMPT: ClassVar[str] = ""
+    min_confidence: ClassVar[float | None] = None  # None → use global MIN_CONFIDENCE
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -111,8 +112,14 @@ class IssueTask(ABC):
         if not cols:
             return
         quoted = ", ".join(quote(c) for c in cols)
+        all_cols = [name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
+        where = (
+            'AND "ocel_changed_field" IS NULL'
+            if "ocel_changed_field" in all_cols
+            else ""
+        )
         peers = conn.execute(
-            f"SELECT {quoted} FROM {quote(table)} WHERE ocel_id != ? LIMIT 5",
+            f'SELECT {quoted} FROM {quote(table)} WHERE ocel_id != ? {where} LIMIT 5',
             (anchor_id,),
         ).fetchall()
         ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
