@@ -1,9 +1,9 @@
 from src.llm.actions import ActionResult, object_attribute_target
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
-class WrongAttributeDatatype(IssueTask):
-    issue_key = "wrong_attribute_datatype"
+class IncorrectAttributeDatatype(ResolutionTask):
+    issue_key = "incorrect_attribute_datatype"
 
     PROMPT = """\
         <task>
