@@ -8,7 +8,7 @@ import polars as pl
 SqliteInput = str | sqlite3.Connection
 
 # OCEL2 reserved columns that aren't user-defined attributes.
-_OCEL_RESERVED = {"ocel_id", "ocel:timestamp", "ocel_type"}
+_OCEL_RESERVED = {"ocel_id", "ocel:timestamp", "ocel_type", "ocel_time", "ocel_changed_field", "new_value"}
 
 def _frame(rows: list[dict], columns: list[str]) -> pl.DataFrame:
     """Build a Utf8-typed DataFrame, enforcing column order even when empty."""
@@ -66,11 +66,21 @@ def _is_missing(value: object) -> bool:
     return isinstance(value, str) and value.strip() == ""
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    names = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    return column in names
+
+
 def _iter_object_attrs(
     conn: sqlite3.Connection,
+    initial_rows_only: bool = False,
 ) -> Iterator[tuple[str, object, str, str, object]]:
     """Yield (object_type, ocel_id, attr_name, declared_type, value) for every
     non-reserved attribute cell across all per-type object tables.
+
+    When initial_rows_only=True, only rows where ocel_changed_field IS NULL are
+    considered — change rows (delta entries) are skipped because null values in
+    unchanged attributes are not missing values.
     """
     for ocel_type, table in _object_type_tables(conn):
         cols = _column_info(conn, table)
@@ -78,8 +88,13 @@ def _iter_object_attrs(
             continue
         attr_names = [c for c, _ in cols]
         quoted = ", ".join(f'"{c}"' for c in attr_names)
+        where = (
+            'WHERE "ocel_changed_field" IS NULL'
+            if initial_rows_only and _has_column(conn, table, "ocel_changed_field")
+            else ""
+        )
         for ocel_id, *values in conn.execute(
-            f'SELECT ocel_id, {quoted} FROM "{table}"'
+            f'SELECT ocel_id, {quoted} FROM "{table}" {where}'
         ).fetchall():
             for (attr, declared), value in zip(cols, values):
                 yield ocel_type, ocel_id, attr, declared, value
@@ -96,7 +111,7 @@ def detect_missing_attribute_value(src: SqliteInput) -> pl.DataFrame:
                 "actual_value": value,
                 "issue": "missing_attribute_value",
             }
-            for ocel_type, ocel_id, attr, _, value in _iter_object_attrs(conn)
+            for ocel_type, ocel_id, attr, _, value in _iter_object_attrs(conn, initial_rows_only=True)
             if _is_missing(value)
         ]
     return _frame(
@@ -321,11 +336,11 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
 def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
+        "missing_object_type":              detect_missing_object_type(src),
+        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "missing_attribute_value":          detect_missing_attribute_value(src),
         "wrong_attribute_datatype":         detect_wrong_attribute_datatype(src),
-        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
-        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
-        "missing_object_type":              detect_missing_object_type(src),
+        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
         "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
     }
