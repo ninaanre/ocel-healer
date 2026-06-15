@@ -1,8 +1,8 @@
 from src.llm.actions import ActionResult
-from src.llm.tasks._base import IssueTask
+from src.llm.tasks._base import ResolutionTask
 
 
-class MissingObjectType(IssueTask):
+class MissingObjectType(ResolutionTask):
     issue_key = "missing_object_type"
 
     PROMPT = """\

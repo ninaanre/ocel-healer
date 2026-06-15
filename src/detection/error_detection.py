@@ -119,7 +119,7 @@ def detect_missing_attribute_value(src: SqliteInput) -> pl.DataFrame:
     )
 
 
-def detect_wrong_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
+def detect_incorrect_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
     """Find attribute values that don't match the column's declared SQLite type.
 
     NULL/empty values are skipped (covered by `detect_missing_attribute_value`).
@@ -133,7 +133,7 @@ def detect_wrong_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
                 "expected_type": declared,
                 "actual_value": repr(value),
                 "actual_python_type": type(value).__name__,
-                "issue": "wrong_attribute_datatype",
+                "issue": "incorrect_attribute_datatype",
             }
             for ocel_type, ocel_id, attr, declared, value in _iter_object_attrs(conn)
             if not _is_missing(value) and not _value_matches_type(value, declared)
@@ -337,10 +337,10 @@ def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
         "missing_object_type":              detect_missing_object_type(src),
-        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "missing_attribute_value":          detect_missing_attribute_value(src),
-        "wrong_attribute_datatype":         detect_wrong_attribute_datatype(src),
+        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
         "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
+        "incorrect_attribute_datatype":     detect_incorrect_attribute_datatype(src),
         "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
         "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
     }
