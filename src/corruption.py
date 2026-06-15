@@ -23,11 +23,20 @@ def _remove_object_primary_key(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE object_tmp RENAME TO object")
 
 
-def inject_n6a(conn: sqlite3.Connection) -> str | None:
-    """N6(a): Insert a fully duplicated object (same ocel_id and ocel_type)."""
-    row = conn.execute(
-        "SELECT ocel_id, ocel_type FROM object WHERE ocel_type IS NOT NULL LIMIT 1"
-    ).fetchone()
+def inject_n6a(conn: sqlite3.Connection, ocel_id: str | None = None) -> str | None:
+    """N6(a): Insert a fully duplicated object (same ocel_id and ocel_type).
+
+    If `ocel_id` is given, that specific object is duplicated; otherwise the
+    first available object is used.
+    """
+    if ocel_id:
+        row = conn.execute(
+            "SELECT ocel_id, ocel_type FROM object WHERE ocel_id = ? LIMIT 1", (ocel_id,)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT ocel_id, ocel_type FROM object WHERE ocel_type IS NOT NULL LIMIT 1"
+        ).fetchone()
     if row is None:
         return None
     conn.execute("INSERT INTO object VALUES (?, ?)", row)
@@ -86,6 +95,46 @@ def inject_n10_object(conn: sqlite3.Connection) -> str | None:
         (event[0], fake_object_id, "unknown"),
     )
     return fake_object_id
+
+
+def inject_n3a_missing_attribute(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    *,
+    count: int = 1,
+    ocel_ids: list[str] | None = None,
+    changed_field_col: str = "ocel_changed_field",
+) -> list[str]:
+    """N3a: Set `column` to NULL in initial-state rows of `table`.
+
+    Pass `ocel_ids` to target specific objects; otherwise the first `count`
+    eligible rows are used. Only targets rows where changed_field_col IS NULL
+    (initial state) so the missing values are genuine data quality issues.
+    """
+    has_changed_field = conn.execute(
+        f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?",
+        (changed_field_col,),
+    ).fetchone()[0]
+    where = (
+        f'WHERE "{changed_field_col}" IS NULL AND "{column}" IS NOT NULL'
+        if has_changed_field
+        else f'WHERE "{column}" IS NOT NULL'
+    )
+    if ocel_ids:
+        placeholders = ", ".join("?" * len(ocel_ids))
+        rows = conn.execute(
+            f'SELECT ocel_id FROM "{table}" {where} AND ocel_id IN ({placeholders})',
+            ocel_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f'SELECT ocel_id FROM "{table}" {where} LIMIT ?', (count,)
+        ).fetchall()
+    affected = [r[0] for r in rows]
+    for ocel_id in affected:
+        conn.execute(f'UPDATE "{table}" SET "{column}" = NULL WHERE ocel_id = ?', (ocel_id,))
+    return affected
 
 
 def inject_n10_event(conn: sqlite3.Connection) -> str | None:
