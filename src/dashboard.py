@@ -42,7 +42,7 @@ def imports():
 @app.cell
 def header(mo):
     mo.md("""
-    # OCEL Error Detection Dashboard
+    # OCEL Error Detection & Resolution Dashboard
     Inspect rule-based data-quality violations in an object-centric event log,
     and ask a local LLM domain expert to suggest a repair for one.
     Pick a SQLite log and browse the violations per detector.

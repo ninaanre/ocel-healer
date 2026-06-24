@@ -84,6 +84,19 @@ def inject_n2(conn: sqlite3.Connection, exclude_id: str | None = None) -> str | 
     return row[0]
 
 
+def inject_n7a_incorrect_object_type(
+    conn: sqlite3.Connection,
+    ocel_id: str,
+    wrong_type: str,
+) -> str | None:
+    """N7(a): Replace ocel_type with an incorrect but non-null value for a specific object."""
+    n = conn.execute(
+        "UPDATE object SET ocel_type = ? WHERE ocel_id = ?",
+        (wrong_type, ocel_id),
+    ).rowcount
+    return ocel_id if n > 0 else None
+
+
 def inject_n10_object(conn: sqlite3.Connection) -> str | None:
     """N10: Insert an E2O relation referencing a non-existent object."""
     event = conn.execute("SELECT ocel_id FROM event LIMIT 1").fetchone()
