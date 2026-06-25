@@ -96,6 +96,31 @@ def load_results(DATA_DIR, detect_all, file_picker, refresh):
 
 
 @app.cell
+def explore_section(mo, llm_enabled, sqlite_path):
+    explore_btn = mo.ui.button(
+        value=0, on_click=lambda v: v + 1,
+        label="Step 0: Explore Log",
+        disabled=not llm_enabled,
+    )
+    explore_btn
+    return (explore_btn,)
+
+
+@app.cell
+def run_exploration(explore_btn, sqlite_path, mo):
+    if explore_btn.value == 0:
+        mo.stop(True)
+    from src.exploration.explorer_agent import create_exploration_report as _create_report
+    from src.exploration.report_store import load_exploration_report as _load_report2
+    _report_path = _create_report(sqlite_path)
+    _report = _load_report2(_report_path)
+    mo.vstack([
+        mo.md("✅ Exploration complete.").callout(kind="success"),
+        mo.md(f"### Exploration Report\n\n{_report}"),
+    ])
+
+
+@app.cell
 def pagers(mo, results):
     # One Prev/Next button pair per detector. Each button accumulates clicks
     # via on_click; current page = next.value - prev.value, clamped to the

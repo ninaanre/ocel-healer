@@ -68,6 +68,28 @@ def ollama_ready() -> tuple[bool, list[str]]:
     return True, [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
 
+def call_ollama_text(system_prompt: str, user_prompt: str, model: str = MODEL) -> str:
+    """Text-mode Ollama call — returns raw string (no JSON constraint)."""
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.0,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{OLLAMA_HOST}/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120.0) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    return payload["choices"][0]["message"]["content"].strip()
+
+
 def call_ollama(user_prompt: str) -> dict[str, Any]:
     """One JSON-mode call to Ollama. Returns the parsed dict."""
     body = json.dumps({

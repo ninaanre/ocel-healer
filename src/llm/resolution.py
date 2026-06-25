@@ -2,19 +2,26 @@ import json
 from typing import Callable, Iterable
 
 from src.detection.error_detection import _connect
+from src.exploration.hint_selector import select_hints_for_issue
 from src.llm import actions
 from src.llm.client import call_ollama
 from src.llm.tasks import get_task
 from src.llm.tasks._base import DetectionResult, DetectionTask
 
+_NO_REPORT = "No exploration report available."
+
 
 def _build_user_prompt(task, ctx: dict) -> str:
-    return (
-        task.prompt
-        + "\n\nContext:\n```json\n"
+    hints = select_hints_for_issue(task.issue_key)
+    parts = [task.prompt]
+    if hints and hints != _NO_REPORT:
+        parts.append(f"\n\nEXPLORATION_REPORT:\n{hints}")
+    parts.append(
+        "\n\nContext:\n```json\n"
         + json.dumps(ctx, default=str, indent=2)
         + "\n```"
     )
+    return "\n".join(parts)
 
 
 def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:

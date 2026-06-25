@@ -25,14 +25,24 @@ class MissingAttributeValue(ResolutionTask):
         </inputs>
 
         <method>
-          If `violation.attribute_name` is "weight" and the object type is product/products:
-            Look at `anchor_entity.name` or `anchor_entity.object_id` to identify the product.
-            Based solely on the product name, recall its real-world weight from your knowledge.
-            Return the weight in the same unit as `peer_objects` (check their values to determine kg vs g).
+          Evidence priority:
+          1. LOCAL_CONTEXT: peer_objects with the same attribute set the expected value, format,
+             and unit. Anchor attributes and events provide additional signals.
+          2. EXPLORATION_REPORT (if present in the prompt):
+             - If the report identifies `ocel_id` as a semantic name (product, person, place),
+               use it as the basis for a domain knowledge lookup.
+             - If the report marks an attribute as derivable from stable domain knowledge,
+               you may use that knowledge.
+             - If the report warns the attribute is ambiguous or process-specific,
+               prefer local context only and return a low-confidence estimate.
+          3. DOMAIN_KNOWLEDGE: only if EXPLORATION_REPORT permits it for this attribute/type,
+             or if the object is a clearly recognisable real-world entity with a stable,
+             factual attribute (e.g. product weight, release year, manufacturer).
 
-          For all other attributes:
+          For all attributes:
             Use `peer_objects` to learn the typical value, data type, units, and format.
             Use the anchor's other attributes and events as additional signals.
+            Use `anchor_entity.name` or `anchor_entity.object_id` if they carry semantic meaning.
         </method>
 
         <example>
@@ -50,10 +60,9 @@ class MissingAttributeValue(ResolutionTask):
         estimate based on the object's name and other attributes, and set confidence
         accordingly (e.g. 0.3). A low-confidence guess is always better than null.
 
-        For Products in the order-management dataset, the product name may be stored
-as the OCEL object id. If anchor_entity.name is missing, use
-anchor_entity.object_id as the product name.
-
+        If `anchor_entity.name` is missing, check whether `anchor_entity.object_id`
+        carries a semantic name (product, person, place) — the EXPLORATION_REPORT
+        will indicate this if it applies.
         </output>
     """
 

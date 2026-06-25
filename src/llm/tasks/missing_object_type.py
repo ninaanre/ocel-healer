@@ -35,6 +35,11 @@ class MissingObjectType(ResolutionTask):
              `role`/`department` → employee; `price`/`weight` → product or item.
           3. Pick exactly one value from `candidate_types`. If multiple fit,
              choose the one whose name best matches the id + qualifiers seen.
+          3b. If EXPLORATION_REPORT is present in the prompt, use its
+              "Object Type Signals" section to validate your reading of the
+              object ID pattern and qualifiers. The report contains hypotheses,
+              not facts — confirm every inference against local context before
+              applying it.
         </method>
 
         <example>
