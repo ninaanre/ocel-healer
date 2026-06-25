@@ -5,4 +5,4 @@ __pycache__/
 .cache/
 *__marimo__
 *dev.ipynb
-data/*.sqlite
+data/age_of_empires_ocel2.sqlite
