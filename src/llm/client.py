@@ -6,7 +6,7 @@ from typing import Any
 
 
 MODEL = os.getenv("OCEL_LLM_MODEL", "qwen2.5:7b")
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+LLM_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 MIN_CONFIDENCE = float(os.getenv("OCEL_LLM_MIN_CONFIDENCE", "0.4"))
 
 
@@ -58,20 +58,28 @@ SYSTEM_PROMPT = (
 )
 
 
-def ollama_ready() -> tuple[bool, list[str]]:
+_active_model: str = MODEL 
+
+def set_active_model(name: str) -> None:
+    """Override the model used for all subsequent LLM calls (dashboard use)."""
+    global _active_model
+    _active_model = name
+
+
+def llm_ready() -> tuple[bool, list[str]]:
     """Return (reachable, available_models). Never raises."""
     try:
-        with urllib.request.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=2.0) as resp:
+        with urllib.request.urlopen(f"{LLM_HOST}/api/tags", timeout=2.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False, []
     return True, [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
 
-def call_ollama(user_prompt: str) -> dict[str, Any]:
+def call_llm(user_prompt: str) -> dict[str, Any]:
     """One JSON-mode call to Ollama. Returns the parsed dict."""
     body = json.dumps({
-        "model": MODEL,
+        "model": _active_model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
@@ -81,7 +89,7 @@ def call_ollama(user_prompt: str) -> dict[str, Any]:
         "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(
-        f"{OLLAMA_HOST}/v1/chat/completions",
+        f"{LLM_HOST}/v1/chat/completions",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
