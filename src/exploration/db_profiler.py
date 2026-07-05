@@ -106,6 +106,17 @@ def detect_id_patterns(values: list[str]) -> dict[str, list[str]]:
     return {k: v[:10] for k, v in patterns.items() if v}
 
 
+def portable_db_path(db_path: Path) -> str:
+    """Return a portable database identifier for serialized profiles."""
+    if not db_path.is_absolute():
+        return db_path.as_posix()
+
+    try:
+        return db_path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return db_path.name
+
+
 def profile_database(db_path: str | Path) -> dict[str, Any]:
     db_path = Path(db_path)
     conn = sqlite3.connect(db_path)
@@ -113,7 +124,7 @@ def profile_database(db_path: str | Path) -> dict[str, Any]:
     tables = list_tables(conn)
 
     profile: dict[str, Any] = {
-        "db_path": str(db_path),
+        "db_path": portable_db_path(db_path),
         "tables": {},
         "object_types": [],
         "event_types": [],
