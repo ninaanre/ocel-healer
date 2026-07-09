@@ -84,12 +84,19 @@ def llm_model_apply(model_picker, reachable, set_active_model):
 
 
 @app.cell
-def file_picker(DATA_DIR, mo, os, top_tab):
+def file_picker(DATA_DIR, mo, os):
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
     default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
     file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL File:")
-    mo.hstack([file_picker, top_tab], justify="start", gap=1.5, align="end")
     return (file_picker,)
+
+
+@app.cell
+def _top_bar(mo, file_picker, top_tab):
+    # Layout-only cell: laying the picker next to the view radio here means
+    # top_tab changes rerun this cell (cheap) instead of the widget cell.
+    mo.hstack([file_picker, top_tab], justify="start", gap=1.5, align="end")
+    return
 
 
 @app.cell
