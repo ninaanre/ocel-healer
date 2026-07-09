@@ -106,6 +106,129 @@ def top_tabs(mo):
 
 
 @app.cell
+def issue_summary(get_flags, mo, results, sqlite_path):
+    _rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
+    _cols = [
+        "Event", "Event Type", "Time", "Event Attribute", "Position",
+        "Object", "Object Type", "Object Attribute",
+        "O2O Relations", "E2O Relations",
+    ]
+
+    _mapping = {
+        ("Missing Data",   "Object Attribute"): ["missing_attribute_value"],
+        ("Missing Data",   "Object Type"):      ["missing_object_type"],
+        ("Missing Data",   "O2O Relations"):    ["dangling_o2o_relationship"],
+        ("Missing Data",   "E2O Relations"):    ["dangling_e2o_relationship"],
+        ("Incorrect Data", "Object Attribute"): ["incorrect_attribute_datatype"],
+        ("Incorrect Data", "Object Type"):      ["incorrect_object_type"],
+        ("Incorrect Data", "Object"):           [
+            "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
+        ],
+    }
+
+    _llm_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
+
+    _llm_detected_keys = {"incorrect_object_type"}
+    _llm_ever_run = any(k[0] == sqlite_path for k in get_flags())
+
+    def _cell_state(row, col):
+        """Return ('none', None), ('pending', None), or ('count', int)."""
+        keys = _mapping.get((row, col))
+        if keys is None:
+            return ("none", None)
+
+        all_llm_pending = all(
+            key in _llm_detected_keys and not _llm_ever_run for key in keys
+        )
+        if all_llm_pending:
+            return ("pending", None)
+        total = 0
+        for key in keys:
+            if key in _llm_detected_keys:
+                total += _llm_confirmed
+            else:
+                total += results[key].height
+        return ("count", total)
+
+    _summary_table_style = (
+        "border-collapse:collapse; font-family:system-ui,-apple-system,sans-serif; "
+        "font-size:13px; border:1px solid #d0d7de; width:auto;"
+    )
+    _summary_th_style = (
+        "background:#f6f8fa; border:1px solid #d0d7de; padding:8px 4px; "
+        "font-weight:600; vertical-align:middle; text-align:center; "
+        "writing-mode:vertical-rl; transform:rotate(180deg); "
+        "height:120px; white-space:nowrap;"
+    )
+    _summary_corner_style = (
+        "background:#f6f8fa; border:1px solid #d0d7de; padding:6px 10px;"
+    )
+    _summary_td_style = (
+        "border:1px solid #d0d7de; padding:6px 8px; text-align:center; "
+        "white-space:nowrap;"
+    )
+    _summary_row_label_style = (
+        "border:1px solid #d0d7de; padding:6px 10px; text-align:left; "
+        "font-weight:600; background:#f6f8fa; white-space:nowrap;"
+    )
+
+    def _pill_html(n):
+        colour = "#cf222e" if n > 0 else "#57606a"
+        bg     = "#fde2e2" if n > 0 else "#f0f0f0"
+        return (
+            f'<span style="display:inline-block; padding:1px 8px; border-radius:10px; '
+            f'font-size:12px; font-weight:600; color:{colour}; background:{bg};">{n}</span>'
+        )
+
+    _dash_html = '<span style="color:#57606a;">—</span>'
+    _pending_html = (
+        '<span title="Detector implemented but the LLM sweep has not been '
+        'run yet for this file." style="display:inline-block; padding:1px 8px; '
+        'border-radius:10px; font-size:12px; font-weight:700; color:#9a6700; '
+        'background:#fff8c5;">?</span>'
+    )
+
+    _header_cells = "".join(f'<th style="{_summary_th_style}">{c}</th>' for c in _cols)
+    _header_row = (
+        f'<tr><th style="{_summary_corner_style}"></th>{_header_cells}</tr>'
+    )
+    _body_rows = []
+    for row in _rows:
+        _cells = [f'<td style="{_summary_row_label_style}">{row}</td>']
+        for col in _cols:
+            kind, count = _cell_state(row, col)
+            if kind == "none":
+                content = _dash_html
+            elif kind == "pending":
+                content = _pending_html
+            else:
+                content = _pill_html(count)
+            _cells.append(f'<td style="{_summary_td_style}">{content}</td>')
+        _body_rows.append("<tr>" + "".join(_cells) + "</tr>")
+    _body_html = "".join(_body_rows)
+
+    _summary_header = mo.Html(
+        '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
+        'border-bottom:1px solid #d0d7de;">'
+        '<div style="font-size:20px; font-weight:700; color:#1f2328; '
+        'letter-spacing:-0.01em;">Issue overview</div>'
+        '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+        'Detected issues per issue type and OCEL dimension. '
+        'A dash means no detector exists for that combination yet; '
+        'a "?" means the detector is implemented but its LLM sweep has '
+        'not been run yet for this file.</div>'
+        '</div>'
+    )
+    _summary_table = mo.Html(
+        f'<table style="{_summary_table_style}">'
+        f'<thead>{_header_row}</thead>'
+        f'<tbody>{_body_html}</tbody></table>'
+    )
+    mo.vstack([_summary_header, _summary_table], gap=0)
+    return
+
+
+@app.cell
 def refresh_btn(mo, top_tab):
     # Click after applying a repair to re-run detection. The widget itself
     # must exist on every render (load_results subscribes to its `.value`),
@@ -126,8 +249,15 @@ def refresh_btn(mo, top_tab):
 
 
 @app.cell
-def load_results(DATA_DIR, detect_all, file_picker, refresh):
-    _ = refresh.value  # subscribe so this cell re-runs on refresh.
+def repair_trigger(mo):
+    get_repair_tick, set_repair_tick = mo.state(0)
+    return get_repair_tick, set_repair_tick
+
+
+@app.cell
+def load_results(DATA_DIR, detect_all, file_picker, get_repair_tick, refresh):
+    _ = refresh.value        # subscribe so this cell re-runs on manual refresh.
+    _ = get_repair_tick()    # subscribe so it re-runs after any applied repair.
     sqlite_path = str(DATA_DIR / file_picker.value)
     results = detect_all(sqlite_path)
     return results, sqlite_path
@@ -158,11 +288,6 @@ def pagers(mo, results):
 
 @app.cell
 def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
-    # ── table rendering ──────────────────────────────────────────────────────
-    # Inline styles per <td>: with the per-tab page cap (10 rows) the total
-    # rendered HTML stays under a few hundred KB even on the dirty OCEL log.
-    # We avoid a single <style> block because marimo doesn't guarantee
-    # passing <style> tags through (see docs: "use mo.iframe for styles").
 
     bad_style   = "background-color:#fde2e2; color:#b00020; font-weight:600;"
     table_style = (
@@ -319,18 +444,12 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
 
 @app.cell
 def expert_state(mo):
-    # Confirmed `incorrect_object_type` flags, scoped to (sqlite_path, ocel_id).
-    # In-memory only -- lost when the dashboard restarts. Each value is the
-    # row dict (ocel_id + ocel_type + issue) so the Resolution tab can hand
-    # it back to suggest_repair without rebuilding it.
     get_flags, set_flags = mo.state({})
     return get_flags, set_flags
 
 
 @app.cell
 def expert_helpers(mo):
-    # Shared helpers used by both tabs. Defined once here so both downstream
-    # cells can render action cards / parse override input consistently.
     import json as _json
 
     def render_action(action):
@@ -392,9 +511,6 @@ def expert_helpers(mo):
 
 @app.cell
 def expert_detection_header(mo, top_tab):
-    # Section header for the LLM-based block on the Detection page. Matches
-    # the "Rule-based detection" header style above (large title + subtitle,
-    # thin bottom rule, no left accent) so the two sections read as peers.
     _header = mo.Html(
         '<div style="margin:36px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
@@ -413,9 +529,6 @@ def expert_detection_header(mo, top_tab):
 def expert_detection_controls(
     object_type_tables, connect_sqlite, llm_enabled, mo, sqlite_path, top_tab,
 ):
-    # One-type-at-a-time sweep: pick a type, judge every instance of it.
-    # Loading the dropdown options is cheap (a single SELECT on object_map_type)
-    # so we always do it; the button stays disabled until LLM + a type are ready.
     with connect_sqlite(sqlite_path) as _conn:
         _types = [t for t, _ in object_type_tables(_conn)]
     type_picker = mo.ui.dropdown(
@@ -446,10 +559,6 @@ def expert_detection_sweep(
     top_tab,
     type_picker,
 ):
-    # Run the sweep when the button has been clicked. Only fires when the
-    # Detection tab is active so switching tabs doesn't re-run.
-    # Pulls every ocel_id of the chosen type and judges each one; progress
-    # bar shows running flagged count so big sweeps stay legible.
     proposals: list = []
     sweep_summary = None
     if (
@@ -810,12 +919,14 @@ def expert_apply(
     detector,
     dry_run_toggle,
     get_flags,
+    get_repair_tick,
     mo,
     override_input,
     parse_override,
     res_rows,
     row_picker,
     set_flags,
+    set_repair_tick,
     sqlite_path,
     suggestion,
     top_tab,
@@ -855,16 +966,20 @@ def expert_apply(
                 _msg = apply_repair(sqlite_path, suggestion, **_kwargs)
                 _kind = "info" if _dry else "success"
                 _prefix = "" if _dry else "✅\n\n"
+                # After a real repair we bump `repair_tick`, which causes
+                # `load_results` to re-run detection immediately — the summary
+                # table and every rule-based section refresh on their own.
                 _suffix = (
                     ""
                     if _dry
-                    else "\n\nClick **Re-run detection** above to refresh the tables."
+                    else "\n\nDetection has been re-run automatically."
                 )
                 apply_view = mo.md(
                     f"{_prefix}```sql\n{_msg}\n```{_suffix}"
                 ).callout(kind=_kind)
                 if not _dry:
                     _drop_confirmed_flag_if_needed()
+                    set_repair_tick(get_repair_tick() + 1)
             except Exception as e:
                 apply_view = mo.md(f"❌ Apply failed: `{e}`").callout(kind="danger")
     apply_view
