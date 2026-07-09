@@ -1,11 +1,17 @@
+import inspect
 import sqlite3
 import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, TYPE_CHECKING
 
-from src.detection.error_detection import _column_info, _object_type_tables
+from pydantic import BaseModel
+
+from src.detection.error_detection import _column_info
+from src.llm.dataset_hints import DatasetHints
+from src.llm.sampling import sample_peers
 from src.llm.sql_utils import quote, table_for_type
+from src.llm.tasks._template import render_task_prompt
 
 if TYPE_CHECKING:
     from src.llm.actions import ActionResult
@@ -42,14 +48,33 @@ class IssueTask(ABC):
         an ActionResult so the existing suggest_repair / apply_repair path
         still works for fix-time calls.
 
-    Subclasses set `issue_key` and `PROMPT`, implement the appropriate parse
-    method, and optionally override `extend_context`, `anchor`, and
-    `suppressed_target`. Importing the module self-registers via
-    `__init_subclass__`.
+    Subclasses set `issue_key`, `family`, `OutputModel`, and the four
+    section strings TASK / INPUTS / METHOD / EXAMPLES. They implement the
+    appropriate parse method and optionally override `extend_context`,
+    `anchor`, and `suppressed_target`. Importing the module self-registers
+    via `__init_subclass__`.
     """
 
     issue_key: ClassVar[str] = ""
+
+    # Task-family key used to select a family persona (see personas.py).
+    # One of "type", "attribute", "relation", "duplicate".
+    family: ClassVar[str] = ""
+
+    # Pydantic model the LLM's reply is validated against.
+    OutputModel: ClassVar[type[BaseModel] | None] = None
+
+    # Prompt sections. Each is a short string; the template splices them
+    # into the seven-section skeleton (see tasks/_template.py).
+    TASK: ClassVar[str] = ""
+    INPUTS: ClassVar[str] = ""
+    METHOD: ClassVar[str] = ""
+    EXAMPLES: ClassVar[str] = ""
+
+    # Legacy: pre-template tasks store the whole prompt in one string.
+    # New tasks leave this empty and set TASK/INPUTS/METHOD/EXAMPLES instead.
     PROMPT: ClassVar[str] = ""
+
     min_confidence: ClassVar[float | None] = None  # None → use global MIN_CONFIDENCE
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -62,17 +87,42 @@ class IssueTask(ABC):
 
     @property
     def prompt(self) -> str:
-        return textwrap.dedent(self.PROMPT).strip()
+        if self.OutputModel is not None and (self.TASK or self.METHOD):
+            return render_task_prompt(
+                task=self.TASK,
+                inputs=self.INPUTS,
+                method=self.METHOD,
+                examples=self.EXAMPLES,
+                output_model=self.OutputModel,
+            )
+        # Legacy path: fall back to the monolithic PROMPT string.
+        if self.PROMPT:
+            return textwrap.dedent(self.PROMPT).strip()
+        raise NotImplementedError(
+            f"{type(self).__name__} must set OutputModel + TASK/INPUTS/METHOD/EXAMPLES "
+            "(new-style) or PROMPT (legacy) to render its prompt."
+        )
 
-    def build_context(self, conn: sqlite3.Connection, row: dict) -> dict:
+    def build_context(
+        self,
+        conn: sqlite3.Connection,
+        row: dict,
+        *,
+        hints: DatasetHints | None = None,
+    ) -> dict:
         """Default context: violation + candidate_types + (anchor object + events)."""
+        from src.detection.error_detection import _object_type_tables
+
+        hints = hints or DatasetHints.empty()
         ctx: dict[str, Any] = {"issue_key": self.issue_key, "violation": dict(row)}
         ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
         anchor_id, anchor_type = self.anchor(row)
         if anchor_id:
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
             self._attach_events(conn, ctx, anchor_id)
-        self.extend_context(conn, ctx, row)
+        if hints.data_semantics:
+            ctx["data_semantics"] = hints.data_semantics
+        self._call_extend_context(conn, ctx, row, hints)
         return ctx
 
     def anchor(self, row: dict) -> tuple[str | None, str | None]:
@@ -82,9 +132,35 @@ class IssueTask(ABC):
             row.get("object_type") or row.get("source_type"),
         )
 
-    def extend_context(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
-        """Hook for task-specific context (peers, candidates, duplicates)."""
+    def extend_context(
+        self,
+        conn: sqlite3.Connection,
+        ctx: dict,
+        row: dict,
+        *,
+        hints: DatasetHints,
+    ) -> None:
+        """Hook for task-specific context (peers, candidates, duplicates).
+
+        New-style tasks accept `hints=` (keyword). Legacy tasks with the
+        old signature `extend_context(conn, ctx, row)` still work — see
+        `_call_extend_context` for the shim.
+        """
         return
+
+    def _call_extend_context(
+        self,
+        conn: sqlite3.Connection,
+        ctx: dict,
+        row: dict,
+        hints: DatasetHints,
+    ) -> None:
+        """Bridge new-style (hints kw) and legacy (no hints) extend_context signatures."""
+        sig = inspect.signature(self.extend_context)
+        if "hints" in sig.parameters:
+            self.extend_context(conn, ctx, row, hints=hints)
+        else:
+            self.extend_context(conn, ctx, row)
 
     @abstractmethod
     def parse_payload(self, row: dict, payload: dict) -> "ActionResult":
@@ -128,31 +204,33 @@ class IssueTask(ABC):
             ).fetchall()
         ]
 
-    def _attach_peers(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
-        """Attach `peer_objects`: up to 5 other rows of the same type, full
-        attribute rows. Used by missing_attribute_value / incorrect_attribute_datatype
-        so the LLM can learn typical value shape/format."""
+    def _attach_peers(
+        self,
+        conn: sqlite3.Connection,
+        ctx: dict,
+        row: dict,
+        *,
+        target_col: str | None = None,
+    ) -> None:
+        """Attach `peer_objects`: up to 5 peers of the same type, full attribute rows.
+
+        Delegates to `sampling.sample_peers` for deterministic + representative
+        selection. When `target_col` is given, stratifies so at least half the
+        peers have a non-null value in that column.
+        """
         anchor_id, anchor_type = self.anchor(row)
         if not anchor_id:
             return
-        table = table_for_type(conn, anchor_type)
-        if not table:
-            return
-        cols = [c for c, _ in _column_info(conn, table)]
-        if not cols:
-            return
-        quoted = ", ".join(quote(c) for c in cols)
-        all_cols = [name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
-        where = (
-            'AND "ocel_changed_field" IS NULL'
-            if "ocel_changed_field" in all_cols
-            else ""
+        peers = sample_peers(
+            conn,
+            row,
+            anchor_id=anchor_id,
+            anchor_type=anchor_type,
+            k=5,
+            target_col=target_col,
         )
-        peers = conn.execute(
-            f'SELECT {quoted} FROM {quote(table)} WHERE ocel_id != ? {where} LIMIT 5',
-            (anchor_id,),
-        ).fetchall()
-        ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
+        if peers:
+            ctx["peer_objects"] = peers
 
 
 # --- Intermediate base classes -------------------------------------------

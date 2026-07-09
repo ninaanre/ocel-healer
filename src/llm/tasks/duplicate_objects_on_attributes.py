@@ -1,53 +1,55 @@
 from src.detection.error_detection import _column_info
 from src.llm.actions import ActionResult, object_attribute_target
+from src.llm.dataset_hints import DatasetHints
+from src.llm.schemas import CanonicalValueOutput
 from src.llm.sql_utils import quote, table_for_type
 from src.llm.tasks._base import ResolutionTask
 
 
 class DuplicateObjectsOnAttributes(ResolutionTask):
     issue_key = "duplicate_objects_on_attributes"
+    family = "duplicate"
+    OutputModel = CanonicalValueOutput
 
-    PROMPT = """\
-        <task>
+    TASK = """
         Two or more objects of the same type share an identical attribute
-        fingerprint but have different `ocel_id`s. Pick the canonical value for
+        fingerprint but differ on `ocel_id`. Pick the canonical value for
         the conflicting attribute on the anchor object.
-        </task>
-
-        <inputs>
-          - violation.attribute_name      the column whose value is in conflict
-                                          (older rows may carry it as `attribute`)
-          - duplicate_attribute_values    the candidate values to choose from
-          - object_attributes             the anchor's full attribute row (use
-                                          its other columns for formatting/casing/units cues)
-          - events                        up to 8 events touching the anchor; their
-                                          activities and qualifiers act as a tiebreaker
-        </inputs>
-
-        <method>
-          1. Compare the candidates in `duplicate_attribute_values`. Prefer the
-             one whose formatting, casing, and units match the anchor's other
-             attributes in `object_attributes`.
-          2. Use `events` activity names and qualifiers as a tiebreaker — an
-             activity often implies the correct value (e.g. 'pay_in_eur'
-             implies 'EUR' for a currency column).
-          3. The chosen value must be one of `duplicate_attribute_values` verbatim.
-        </method>
-
-        <example>
-          violation.attribute_name='currency'
-          duplicate_attribute_values=['EUR', 'USD']
-          object_attributes={country:'DE', amount:'100.00'}
-          events=[{activity:'pay_in_eur'}]
-          → {"canonical_value": "EUR", "rationale": "country='DE' and activity 'pay_in_eur' both point to EUR over USD", "confidence": 0.9}
-        </example>
-
-        <output>
-        JSON: {"canonical_value": any, "rationale": str, "confidence": number}
-        </output>
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict) -> None:
+    INPUTS = """
+        - violation.attribute_name      the column in conflict (older rows
+                                        may carry it as `attribute`)
+        - duplicate_attribute_values    the candidate values to choose from
+        - object_attributes             the anchor's full attribute row — use
+                                        its other columns as formatting /
+                                        casing / units cues
+        - events                        up to 8 events touching the anchor;
+                                        their activities and qualifiers are
+                                        tiebreakers
+    """
+
+    METHOD = """
+        1. Compare the candidates in `duplicate_attribute_values`. Prefer
+           the one whose formatting, casing, and units match the anchor's
+           other attributes.
+        2. Use `events` activities and qualifiers as tiebreakers (e.g.
+           activity `pay_in_eur` implies `EUR` over `USD`).
+        3. The chosen value must be one of `duplicate_attribute_values`
+           verbatim.
+    """
+
+    EXAMPLES = """
+        violation.attribute_name = 'currency'
+        duplicate_attribute_values = ['EUR', 'USD']
+        object_attributes = {country: 'DE', amount: '100.00'}
+        events = [{activity: 'pay_in_eur'}]
+        → {"canonical_value": "EUR",
+           "rationale": "country='DE' and activity 'pay_in_eur' both point to EUR over USD",
+           "confidence": 0.9}
+    """
+
+    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
         dup_vals = row.get("attribute_values", "")
         ctx["duplicate_attribute_values"] = [
             v.strip() for v in str(dup_vals).split(",") if v.strip()

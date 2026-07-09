@@ -113,6 +113,16 @@ def unknown_issue_noop(issue_key: str) -> dict:
     )
 
 
+def malformed_output_noop(task, row: dict, error: str) -> dict:
+    """Surface an LLMOutputInvalid as a routable noop so the UI can offer an override."""
+    return _action(
+        "noop", target=task.suppressed_target(row) or _EMPTY_TARGET,
+        new_value=None,
+        rationale=f"LLM reply did not match the task schema: {error}",
+        confidence=0.0, issue_key=task.issue_key, proposed_value=None,
+    )
+
+
 def from_task_result(task, row: dict, payload: dict) -> dict:
     confidence = float(payload.get("confidence", 0.0))
     rationale = str(payload.get("rationale", ""))

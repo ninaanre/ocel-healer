@@ -3,18 +3,35 @@ from typing import Callable, Iterable
 
 from src.detection.error_detection import _connect
 from src.llm import actions
-from src.llm.client import call_llm
+from src.llm.client import LLMOutputInvalid, call_llm, call_task
+from src.llm.dataset_hints import load_cached as _load_hints_cached
+from src.llm.personas import BASE_PERSONA, compose as compose_persona
 from src.llm.tasks import get_task
-from src.llm.tasks._base import DetectionResult, DetectionTask
+from src.llm.tasks._base import DetectionResult, DetectionTask, IssueTask
 
 
-def _build_user_prompt(task, ctx: dict) -> str:
-    return (
+def _build_messages(task: IssueTask, ctx: dict) -> tuple[str, str]:
+    """Return (system, user). System = base + family persona; user = task prompt + context."""
+    system = compose_persona(task.family) if task.family else BASE_PERSONA
+    user = (
         task.prompt
         + "\n\nContext:\n```json\n"
         + json.dumps(ctx, default=str, indent=2)
         + "\n```"
     )
+    return system, user
+
+
+def _call_task_or_legacy(task: IssueTask, ctx: dict) -> dict:
+    """Route through `call_task` (validated + retry) if the task declares an
+    OutputModel; otherwise fall back to the legacy unvalidated `call_llm`.
+
+    Once every task is migrated, drop this branch and always use `call_task`.
+    """
+    system, user = _build_messages(task, ctx)
+    if task.OutputModel is not None:
+        return call_task(system, user, task.OutputModel)
+    return call_llm(user, system_prompt=system)
 
 
 def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
@@ -22,9 +39,13 @@ def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
     task = get_task(issue_key)
     if task is None:
         return actions.unknown_issue_noop(issue_key)
+    hints = _load_hints_cached(sqlite_path)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row)
-    payload = call_llm(_build_user_prompt(task, ctx))
+        ctx = task.build_context(conn, row, hints=hints)
+    try:
+        payload = _call_task_or_legacy(task, ctx)
+    except LLMOutputInvalid as e:
+        return actions.malformed_output_noop(task, row, str(e))
     return actions.from_task_result(task, row, payload)
 
 
@@ -43,9 +64,18 @@ def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionRes
             f"Task {issue_key!r} is a resolution task, not a detection task. "
             f"Use suggest_repair instead."
         )
+    hints = _load_hints_cached(sqlite_path)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row)
-    payload = call_llm(_build_user_prompt(task, ctx))
+        ctx = task.build_context(conn, row, hints=hints)
+    try:
+        payload = _call_task_or_legacy(task, ctx)
+    except LLMOutputInvalid as e:
+        return DetectionResult(
+            flagged=False,
+            rationale=f"LLM output invalid: {e}",
+            confidence=0.0,
+            suggested_value=None,
+        )
     return task.parse_detection(row, payload)
 
 
