@@ -3,7 +3,7 @@ from typing import Callable, Iterable
 
 from src.detection.error_detection import _connect
 from src.llm import actions
-from src.llm.client import call_ollama
+from src.llm.client import call_llm
 from src.llm.tasks import get_task
 from src.llm.tasks._base import DetectionResult, DetectionTask
 
@@ -24,7 +24,7 @@ def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
         return actions.unknown_issue_noop(issue_key)
     with _connect(sqlite_path) as conn:
         ctx = task.build_context(conn, row)
-    payload = call_ollama(_build_user_prompt(task, ctx))
+    payload = call_llm(_build_user_prompt(task, ctx))
     return actions.from_task_result(task, row, payload)
 
 
@@ -45,7 +45,7 @@ def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionRes
         )
     with _connect(sqlite_path) as conn:
         ctx = task.build_context(conn, row)
-    payload = call_ollama(_build_user_prompt(task, ctx))
+    payload = call_llm(_build_user_prompt(task, ctx))
     return task.parse_detection(row, payload)
 
 
