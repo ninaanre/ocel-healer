@@ -84,19 +84,44 @@ def llm_model_apply(model_picker, reachable, set_active_model):
 
 
 @app.cell
-def file_picker(DATA_DIR, mo, os):
+def file_picker(DATA_DIR, mo, os, top_tab):
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
     default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
     file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL file")
-    file_picker
+    mo.hstack([file_picker, top_tab], justify="start", gap=1.5, align="end")
     return (file_picker,)
 
 
 @app.cell
-def refresh_btn(mo):
-    # Click after applying a repair to re-run detection.
-    refresh = mo.ui.refresh(label="Re-run detection", default_interval=None)
-    refresh
+def top_tabs(mo):
+    # Widget defined here, laid out by the `file_picker` cell so it can sit
+    # next to the OCEL file dropdown.
+    top_tab = mo.ui.radio(
+        options=["Detection", "Resolution"],
+        value="Detection",
+        label="View",
+        inline=True,
+    )
+    return (top_tab,)
+
+
+@app.cell
+def refresh_btn(mo, top_tab):
+    # Click after applying a repair to re-run detection. The widget itself
+    # must exist on every render (load_results subscribes to its `.value`),
+    # but we only *show* it on the Detection page.
+    refresh = mo.ui.refresh(label="Re-run rule-based detection", default_interval=None)
+    _rule_header = mo.Html(
+        '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
+        'border-bottom:1px solid #d0d7de;">'
+        '<div style="font-size:20px; font-weight:700; color:#1f2328; '
+        'letter-spacing:-0.01em;">Rule-based detection</div>'
+        '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+        'Deterministic checks over the OCEL log. Use the button below to '
+        're-run after applying a repair.</div>'
+        '</div>'
+    )
+    mo.vstack([_rule_header, refresh], gap=0.25) if top_tab.value == "Detection" else mo.md("")
     return (refresh,)
 
 
@@ -132,7 +157,7 @@ def pagers(mo, results):
 
 
 @app.cell
-def sections(PAGE_SIZE, mo, pager_buttons, results):
+def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
     # ── table rendering ──────────────────────────────────────────────────────
     # Inline styles per <td>: with the per-tab page cap (10 rows) the total
     # rendered HTML stays under a few hundred KB even on the dirty OCEL log.
@@ -287,31 +312,9 @@ def sections(PAGE_SIZE, mo, pager_buttons, results):
     rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
     rel_section = mo.vstack([rel_heading, mo.accordion({"Show tables": rel_tabs})], gap=0)
 
-    mo.vstack([obj_section, attr_section, rel_section], gap=0)
+    _auto_view = mo.vstack([obj_section, attr_section, rel_section], gap=0)
+    _auto_view if top_tab.value == "Detection" else mo.md("")
     return
-
-
-@app.cell
-def expert_header_and_tabs(mo):
-    # Render the header and the Detection/Resolution tab strip together so
-    # the switcher sits immediately under the section title — downstream
-    # cells gated on `expert_tab.value` only fill the active tab body.
-    expert_tab = mo.ui.tabs(
-        {
-            "Detection": mo.md(""),  # bodies are filled in by downstream cells
-            "Resolution": mo.md(""),
-        },
-        value="Detection",
-    )
-    mo.vstack([
-        mo.md("""
-        ---
-        ## Domain Expert (LLM)
-        _Detection flags suspicious rows; Resolution proposes and applies repairs._
-        """),
-        expert_tab,
-    ], gap=0.5)
-    return (expert_tab,)
 
 
 @app.cell
@@ -388,8 +391,27 @@ def expert_helpers(mo):
 # ── Detection tab ────────────────────────────────────────────────────────
 
 @app.cell
+def expert_detection_header(mo, top_tab):
+    # Section header for the LLM-based block on the Detection page. Matches
+    # the "Rule-based detection" header style above (large title + subtitle,
+    # thin bottom rule, no left accent) so the two sections read as peers.
+    _header = mo.Html(
+        '<div style="margin:36px 0 14px 0; padding-bottom:8px; '
+        'border-bottom:1px solid #d0d7de;">'
+        '<div style="font-size:20px; font-weight:700; color:#1f2328; '
+        'letter-spacing:-0.01em;">LLM-based detection</div>'
+        '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+        'Pick an object type and let the domain expert flag suspicious rows. '
+        'Confirmed flags carry over to the Resolution tab.</div>'
+        '</div>'
+    )
+    _header if top_tab.value == "Detection" else mo.md("")
+    return
+
+
+@app.cell
 def expert_detection_controls(
-    object_type_tables, connect_sqlite, expert_tab, llm_enabled, mo, sqlite_path,
+    object_type_tables, connect_sqlite, llm_enabled, mo, sqlite_path, top_tab,
 ):
     # One-type-at-a-time sweep: pick a type, judge every instance of it.
     # Loading the dropdown options is cheap (a single SELECT on object_map_type)
@@ -407,7 +429,7 @@ def expert_detection_controls(
     )
     _controls_view = (
         mo.hstack([type_picker, detect_btn], justify="start", gap=1)
-        if expert_tab.value == "Detection"
+        if top_tab.value == "Detection"
         else mo.md("")
     )
     _controls_view
@@ -419,19 +441,19 @@ def expert_detection_sweep(
     connect_sqlite,
     detect_all_with_llm,
     detect_btn,
-    expert_tab,
     mo,
     sqlite_path,
+    top_tab,
     type_picker,
 ):
     # Run the sweep when the button has been clicked. Only fires when the
-    # Detection tab is active so switching to Resolution doesn't re-run.
+    # Detection tab is active so switching tabs doesn't re-run.
     # Pulls every ocel_id of the chosen type and judges each one; progress
     # bar shows running flagged count so big sweeps stay legible.
     proposals: list = []
     sweep_summary = None
     if (
-        expert_tab.value == "Detection"
+        top_tab.value == "Detection"
         and detect_btn.value
         and type_picker.value
     ):
@@ -513,16 +535,16 @@ def expert_detection_buttons(mo, proposals):
 @app.cell
 def expert_detection_render(
     agree_array,
-    expert_tab,
     get_flags,
     mo,
     proposals,
     reject_array,
     sqlite_path,
     sweep_summary,
+    top_tab,
 ):
     detection_view = None
-    if expert_tab.value == "Detection":
+    if top_tab.value == "Detection":
         if not proposals:
             detection_view = sweep_summary or mo.md(
                 "_Click **Run detection** to start a sweep._"
@@ -604,7 +626,44 @@ def expert_detection_agree(
 # ── Resolution tab ───────────────────────────────────────────────────────
 
 @app.cell
-def expert_pickers(expert_tab, get_flags, mo, results, sqlite_path):
+def expert_resolution_rule_header(mo, top_tab):
+    # Section header for the (future) rule-based repair block on the
+    # Resolution page. Matches the "Rule-based detection" header style on
+    # the Detection page so the two pages read as mirror images.
+    _header = mo.Html(
+        '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
+        'border-bottom:1px solid #d0d7de;">'
+        '<div style="font-size:20px; font-weight:700; color:#1f2328; '
+        'letter-spacing:-0.01em;">Rule-based resolution</div>'
+        '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+        'Deterministic repairs for rule-based detections. '
+        '<em>Coming soon.</em></div>'
+        '</div>'
+    )
+    _header if top_tab.value == "Resolution" else mo.md("")
+    return
+
+
+@app.cell
+def expert_resolution_llm_header(mo, top_tab):
+    # Section header for the LLM-based repair block on the Resolution page.
+    # Matches the "LLM-based detection" header style on the Detection page.
+    _header = mo.Html(
+        '<div style="margin:36px 0 14px 0; padding-bottom:8px; '
+        'border-bottom:1px solid #d0d7de;">'
+        '<div style="font-size:20px; font-weight:700; color:#1f2328; '
+        'letter-spacing:-0.01em;">LLM-based resolution</div>'
+        '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+        'Ask the domain expert to suggest and apply a repair for one '
+        'flagged row at a time.</div>'
+        '</div>'
+    )
+    _header if top_tab.value == "Resolution" else mo.md("")
+    return
+
+
+@app.cell
+def expert_pickers(get_flags, mo, results, sqlite_path, top_tab):
     # In Resolution mode, expose every detector that has rows to act on,
     # PLUS `incorrect_object_type` if the user has confirmed any flags.
     # Sorted alphabetically so the dropdown order is stable / predictable.
@@ -620,7 +679,7 @@ def expert_pickers(expert_tab, get_flags, mo, results, sqlite_path):
         options=available, value=(available[0] if available else None),
         label="Issue type",
     )
-    if expert_tab.value != "Resolution":
+    if top_tab.value != "Resolution":
         _pickers_view = mo.md("")
     elif not available:
         _pickers_view = mo.md(
@@ -654,7 +713,7 @@ def expert_resolution_rows(detector, get_flags, results, sqlite_path):
 
 
 @app.cell
-def expert_row_picker(expert_tab, mo, res_rows):
+def expert_row_picker(mo, res_rows, top_tab):
     if not res_rows:
         row_picker = mo.md("_No rows to pick from._")
     else:
@@ -668,13 +727,13 @@ def expert_row_picker(expert_tab, mo, res_rows):
             value=labels[0] if labels else None,
             label="Row",
         )
-    _row_picker_view = row_picker if expert_tab.value == "Resolution" else mo.md("")
+    _row_picker_view = row_picker if top_tab.value == "Resolution" else mo.md("")
     _row_picker_view
     return (row_picker,)
 
 
 @app.cell
-def expert_buttons(expert_tab, llm_enabled, mo):
+def expert_buttons(llm_enabled, mo, top_tab):
     ask_btn = mo.ui.run_button(label="Ask domain expert", disabled=not llm_enabled)
     dry_run_toggle = mo.ui.switch(value=True, label="Dry run")
     apply_btn = mo.ui.run_button(label="Apply", kind="danger")
@@ -684,7 +743,7 @@ def expert_buttons(expert_tab, llm_enabled, mo):
             justify="start",
             gap=0.75,
         )
-        if expert_tab.value == "Resolution"
+        if top_tab.value == "Resolution"
         else mo.md("")
     )
     _buttons_view
@@ -695,7 +754,6 @@ def expert_buttons(expert_tab, llm_enabled, mo):
 def expert_suggest(
     ask_btn,
     detector,
-    expert_tab,
     is_routable,
     llm_enabled,
     mo,
@@ -704,11 +762,12 @@ def expert_suggest(
     row_picker,
     sqlite_path,
     suggest_repair,
+    top_tab,
 ):
     suggestion = None
     override_input = None
     suggest_view = None
-    if expert_tab.value != "Resolution":
+    if top_tab.value != "Resolution":
         pass  # only Resolution tab drives this cell
     elif not llm_enabled:
         suggest_view = mo.md("_Enable Ollama to use the domain expert._")
@@ -739,7 +798,7 @@ def expert_suggest(
                     suggest_view = action_view
             except Exception as e:
                 suggest_view = mo.md(f"❌ LLM call failed: `{e}`").callout(kind="danger")
-    _suggest_outer = suggest_view if expert_tab.value == "Resolution" else mo.md("")
+    _suggest_outer = suggest_view if top_tab.value == "Resolution" else mo.md("")
     _suggest_outer
     return override_input, suggestion
 
@@ -750,7 +809,6 @@ def expert_apply(
     apply_repair,
     detector,
     dry_run_toggle,
-    expert_tab,
     get_flags,
     mo,
     override_input,
@@ -760,6 +818,7 @@ def expert_apply(
     set_flags,
     sqlite_path,
     suggestion,
+    top_tab,
 ):
     def _drop_confirmed_flag_if_needed():
         """After committing a fix on an `incorrect_object_type` confirmed
@@ -779,7 +838,7 @@ def expert_apply(
             set_flags(_current)
 
     apply_view = None
-    if expert_tab.value == "Resolution" and apply_btn.value:
+    if top_tab.value == "Resolution" and apply_btn.value:
         if suggestion is None:
             apply_view = mo.md("_Run the domain expert first._")
         else:
