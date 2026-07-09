@@ -87,7 +87,7 @@ def llm_model_apply(model_picker, reachable, set_active_model):
 def file_picker(DATA_DIR, mo, os, top_tab):
     files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
     default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
-    file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL file")
+    file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL File:")
     mo.hstack([file_picker, top_tab], justify="start", gap=1.5, align="end")
     return (file_picker,)
 
@@ -99,7 +99,7 @@ def top_tabs(mo):
     top_tab = mo.ui.radio(
         options=["Detection", "Resolution"],
         value="Detection",
-        label="View",
+        label="View:",
         inline=True,
     )
     return (top_tab,)
@@ -109,7 +109,7 @@ def top_tabs(mo):
 def issue_summary(get_flags, mo, results, sqlite_path):
     _rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
     _cols = [
-        "Event", "Event Type", "Time", "Event Attribute", "Position",
+        "Event", "Event Type", "Event Time", "Event Attribute", "Event Position",
         "Object", "Object Type", "Object Attribute",
         "O2O Relations", "E2O Relations",
     ]
@@ -211,7 +211,7 @@ def issue_summary(get_flags, mo, results, sqlite_path):
         '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
-        'letter-spacing:-0.01em;">Issue overview</div>'
+        'letter-spacing:-0.01em;">Issue Overview</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
         'Detected issues per issue type and OCEL dimension. '
         'A dash means no detector exists for that combination yet; '
@@ -238,7 +238,7 @@ def refresh_btn(mo, top_tab):
         '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
-        'letter-spacing:-0.01em;">Rule-based detection</div>'
+        'letter-spacing:-0.01em;">Rule-based Detection</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
         'Deterministic checks over the OCEL log. Use the button below to '
         're-run after applying a repair.</div>'
@@ -515,7 +515,7 @@ def expert_detection_header(mo, top_tab):
         '<div style="margin:36px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
-        'letter-spacing:-0.01em;">LLM-based detection</div>'
+        'letter-spacing:-0.01em;">LLM-based Detection</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
         'Pick an object type and let the domain expert flag suspicious rows. '
         'Confirmed flags carry over to the Resolution tab.</div>'
@@ -743,10 +743,9 @@ def expert_resolution_rule_header(mo, top_tab):
         '<div style="margin:8px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
-        'letter-spacing:-0.01em;">Rule-based resolution</div>'
+        'letter-spacing:-0.01em;">Rule-based Resolution</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
-        'Deterministic repairs for rule-based detections. '
-        '<em>Coming soon.</em></div>'
+        'Deterministic repairs for detected issues.</div>'
         '</div>'
     )
     _header if top_tab.value == "Resolution" else mo.md("")
@@ -761,7 +760,7 @@ def expert_resolution_llm_header(mo, top_tab):
         '<div style="margin:36px 0 14px 0; padding-bottom:8px; '
         'border-bottom:1px solid #d0d7de;">'
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
-        'letter-spacing:-0.01em;">LLM-based resolution</div>'
+        'letter-spacing:-0.01em;">LLM-based Resolution</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
         'Ask the domain expert to suggest and apply a repair for one '
         'flagged row at a time.</div>'
