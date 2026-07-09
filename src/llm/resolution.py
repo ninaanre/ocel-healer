@@ -1,4 +1,7 @@
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
 from src.detection.error_detection import _connect
@@ -86,28 +89,54 @@ def detect_all_with_llm(
     *,
     on_progress: Callable[[int, int, dict, DetectionResult], None] | None = None,
 ) -> list[tuple[dict, DetectionResult]]:
-    """Run detect_with_llm over an iterable of candidate rows.
+    """Run detect_with_llm over an iterable of candidate rows, concurrently.
 
-    Returns one (row, verdict) pair per candidate. `on_progress(i, total, row,
-    verdict)` is called after each LLM round-trip so the dashboard can render
-    a progress indicator. Per-row exceptions are swallowed and surfaced as
-    `flagged=False, rationale="<error>"` so a single bad row doesn't sink the
-    whole sweep.
+    Concurrency is bounded by env var OCEL_LLM_MAX_WORKERS (default 8). LLM
+    semantics match the sequential path exactly -- each row still goes
+    through one `detect_with_llm` call. Per-row exceptions surface as
+    `flagged=False, rationale="detection failed: ..."` so a single bad row
+    doesn't sink the whole sweep.
+
+    Return list is in input order. `on_progress(i, total, row, verdict)`
+    fires in *completion* order (i is monotonic 1..total; rows arrive as
+    workers finish), serialized under an internal lock so callbacks may
+    safely mutate shared state.
     """
     rows_list = list(rows)
     total = len(rows_list)
-    out: list[tuple[dict, DetectionResult]] = []
-    for i, row in enumerate(rows_list, 1):
+    if total == 0:
+        return []
+
+    max_workers = max(1, int(os.getenv("OCEL_LLM_MAX_WORKERS", "8")))
+    max_workers = min(max_workers, total)
+
+    results: list[tuple[dict, DetectionResult] | None] = [None] * total
+    progress_lock = threading.Lock()
+    completed = [0]  # boxed so the closure can mutate it under the lock
+
+    def _worker(row: dict) -> DetectionResult:
         try:
-            verdict = detect_with_llm(issue_key, row, sqlite_path)
+            return detect_with_llm(issue_key, row, sqlite_path)
         except Exception as e:  # noqa: BLE001 -- surface any failure as a noop verdict
-            verdict = DetectionResult(
+            return DetectionResult(
                 flagged=False,
                 rationale=f"detection failed: {e}",
                 confidence=0.0,
                 suggested_value=None,
             )
-        out.append((row, verdict))
-        if on_progress is not None:
-            on_progress(i, total, row, verdict)
-    return out
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ocel-llm") as pool:
+        future_to_idx = {
+            pool.submit(_worker, row): idx for idx, row in enumerate(rows_list)
+        }
+        for fut in as_completed(future_to_idx):
+            idx = future_to_idx[fut]
+            row = rows_list[idx]
+            verdict = fut.result()  # never raises -- _worker catches everything
+            results[idx] = (row, verdict)
+            if on_progress is not None:
+                with progress_lock:
+                    completed[0] += 1
+                    on_progress(completed[0], total, row, verdict)
+
+    return [r for r in results]  # every slot filled; type is now list[tuple[...]]
