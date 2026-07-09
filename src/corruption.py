@@ -247,6 +247,7 @@ def inject_n3a_missing_attribute(
 def inject_n2_null_employee(conn: sqlite3.Connection) -> str | None:
     """N2 Easy: NULL the ocel_type of a specific, well-known employee.
 
+    Before: ocel_id='Wil van der Aalst', ocel_type='employees'.
     Easy because the id `Wil van der Aalst` looks unmistakably like a person
     name and only appears in `object_Employees`, so the resolver has strong
     signal.
@@ -257,6 +258,7 @@ def inject_n2_null_employee(conn: sqlite3.Connection) -> str | None:
 def inject_n2_empty_string_order(conn: sqlite3.Connection) -> str | None:
     """N2 Medium: Set ocel_type to '' on a specific order.
 
+    Before: ocel_id='o-990010', ocel_type='orders'.
     Medium because empty-string types trip the detector (which treats
     whitespace as missing) but resolvers that key on ``IS NULL`` will miss it,
     and the id `o-990010` is only mildly informative on its own.
@@ -267,6 +269,7 @@ def inject_n2_empty_string_order(conn: sqlite3.Connection) -> str | None:
 def inject_n2_whitespace_product(conn: sqlite3.Connection) -> str | None:
     """N2 Hard: Set ocel_type to a whitespace-only string on a product.
 
+    Before: ocel_id='MacBook Pro', ocel_type='products'.
     Hard because the visible symptom is subtle (three spaces render as a
     blank cell) and the resolver must fall back on membership in
     `object_Products` to recover the type.
@@ -293,6 +296,7 @@ def _null_type_for(
 def inject_n3a_null_product_weight(conn: sqlite3.Connection) -> list[str]:
     """N3a Easy: NULL the weight of `iPhone 8` (id-as-name hint applies).
 
+    Before: object_Products.weight=0.21 for ocel_id='iPhone 8'.
     Easy because the hints file marks products as ``id_is_name: true`` for
     ``weight``, so the resolver can look up the real-world weight directly
     from general knowledge.
@@ -305,6 +309,7 @@ def inject_n3a_null_product_weight(conn: sqlite3.Connection) -> list[str]:
 def inject_n3a_empty_string_role(conn: sqlite3.Connection) -> list[str]:
     """N3a Medium: Set `role` to '' for `Christine von Dobbert`.
 
+    Before: object_Employees.role='Sales' for ocel_id='Christine von Dobbert'.
     Medium because roles have a small closed vocabulary but there's no
     external ground truth — the resolver must infer from peer employees.
     """
@@ -319,6 +324,7 @@ def inject_n3a_empty_string_role(conn: sqlite3.Connection) -> list[str]:
 def inject_n3a_null_order_price(conn: sqlite3.Connection) -> list[str]:
     """N3a Hard: NULL the initial `price` of order `o-990050`.
 
+    Before: object_Orders.price=6518.96 for ocel_id='o-990050'.
     Hard because order prices are not derivable from external knowledge or
     from peer orders (each order has a unique basket); the resolver may need
     to sum linked item prices, or decline with low confidence.
@@ -336,6 +342,7 @@ def inject_n3a_null_order_price(conn: sqlite3.Connection) -> list[str]:
 def inject_n7a_swap_order_to_employee(conn: sqlite3.Connection) -> str | None:
     """N7a Easy: Retype order `o-990001` as `employees`.
 
+    Before: object.ocel_type='orders' for ocel_id='o-990001'.
     Easy because an order id (`o-990001`) reads nothing like an employee
     name and its events (`place order`, `confirm order`, ...) don't match
     what employees do.
@@ -346,6 +353,7 @@ def inject_n7a_swap_order_to_employee(conn: sqlite3.Connection) -> str | None:
 def inject_n7a_swap_item_to_product(conn: sqlite3.Connection) -> str | None:
     """N7a Medium: Retype item `i-880100` as `products`.
 
+    Before: object.ocel_type='items' for ocel_id='i-880100'.
     Medium because items and products share the same per-type schema
     (`weight`, `price`), so the LLM must disambiguate via the id pattern
     (`i-*` vs product-name) and the events the object participates in.
@@ -356,6 +364,7 @@ def inject_n7a_swap_item_to_product(conn: sqlite3.Connection) -> str | None:
 def inject_n7a_case_variant_customers(conn: sqlite3.Connection) -> str | None:
     """N7a Hard: Retype a customer as `CUSTOMERS` (case variant).
 
+    Before: object.ocel_type='customers' for ocel_id='Carpathian Financial Services plc'.
     Hard because the wrong type is one uppercase-transform away from the
     right answer, so a naive prompt might normalise it silently.
     """
@@ -378,6 +387,7 @@ def inject_n7a_case_variant_customers(conn: sqlite3.Connection) -> str | None:
 def inject_datatype_string_in_weight(conn: sqlite3.Connection) -> str | None:
     """Datatype Easy: Put `'unknown'` into `object_Products.weight` (REAL).
 
+    Before: object_Products.weight=0.44 (REAL) for ocel_id='iPad Air'.
     Easy because the fix is to look up the real weight of `iPad Air`, which
     the resolver can recall from general knowledge (id-as-name hint).
     """
@@ -392,6 +402,7 @@ def inject_datatype_string_in_weight(conn: sqlite3.Connection) -> str | None:
 def inject_datatype_string_in_order_price(conn: sqlite3.Connection) -> str | None:
     """Datatype Medium: Put `'TBD'` into `object_Orders.price` (REAL).
 
+    Before: object_Orders.price=5383.99 (REAL) for ocel_id='o-990200'.
     Medium because the resolver has to coerce to a numeric type but there's
     no external truth for the concrete order value — it must lean on
     linked items or return low confidence.
@@ -407,6 +418,7 @@ def inject_datatype_string_in_order_price(conn: sqlite3.Connection) -> str | Non
 def inject_datatype_blob_in_role(conn: sqlite3.Connection) -> str | None:
     """Datatype Hard: Put a `bytes` blob into `object_Employees.role` (TEXT).
 
+    Before: object_Employees.role='Sales' (TEXT) for ocel_id='Jan Niklas Adams'.
     Hard because the stored value is opaque binary — the resolver must
     infer the intended role from peer employees rather than any hint from
     the corrupted value itself.
@@ -425,13 +437,17 @@ def inject_datatype_blob_in_role(conn: sqlite3.Connection) -> str | None:
 
 
 def inject_dup_id_product(conn: sqlite3.Connection) -> str | None:
-    """N6a Easy: Duplicate the (`Echo Dot`, `products`) row in `object`."""
+    """N6a Easy: Duplicate the (`Echo Dot`, `products`) row in `object`.
+
+    Before: object has 1 row for ocel_id='Echo Dot' with ocel_type='products'.
+    """
     return inject_n6a(conn, ocel_id="Echo Dot")
 
 
 def inject_dup_id_conflicting_types(conn: sqlite3.Connection) -> str | None:
     """N6a Medium: Insert `('o-990300', 'items')` next to the real order row.
 
+    Before: object has 1 row for ocel_id='o-990300' with ocel_type='orders'.
     The duplicate row has a DIFFERENT ocel_type; the deterministic delete
     path used by the resolver requires all duplicates to share one type, so
     this flavor exercises the `unrouted` review branch.
@@ -443,6 +459,8 @@ def inject_dup_id_conflicting_types(conn: sqlite3.Connection) -> str | None:
 def inject_dup_id_triple_null_type(conn: sqlite3.Connection) -> str | None:
     """N6a Hard: Add two extra rows for one customer id, one with NULL type.
 
+    Before: object has 1 row for ocel_id='AlpenTech Innovations AG' with
+    ocel_type='customers'.
     Produces `count = 3` for that ocel_id and simultaneously seeds
     `missing_object_type` — the resolver has to reconcile three
     occurrences one of which is un-typed.
@@ -459,7 +477,12 @@ def inject_dup_id_triple_null_type(conn: sqlite3.Connection) -> str | None:
 
 
 def inject_n6b_clone_product(conn: sqlite3.Connection) -> str | None:
-    """N6b Easy: Clone `Echo Dot`'s initial-state row under a fabricated id."""
+    """N6b Easy: Clone `Echo Dot`'s initial-state row under a fabricated id.
+
+    Before: object_Products for ocel_id='Echo Dot' has a single initial row
+    (ocel_time='2023-04-03 01:00:00', weight=0.38, price=29.99). After
+    injection, ocel_id='products:CLONE_ECHO_DOT' carries the same tuple.
+    """
     return _clone_object_row(
         conn,
         source_id="Echo Dot",
@@ -472,6 +495,8 @@ def inject_n6b_clone_product(conn: sqlite3.Connection) -> str | None:
 def inject_n6b_clone_employee(conn: sqlite3.Connection) -> str | None:
     """N6b Medium: Insert two employees with identical fabricated attributes.
 
+    Before: no `Consulting` role exists in object_Employees (roles are
+    Sales / Shipment / Warehousing).
     Medium because cloning a person is a more delicate merge decision than
     cloning a product SKU — the resolver has to commit to keeping one.
     Uses a fabricated `role='Consulting'` so the two new rows form a fresh
@@ -499,6 +524,11 @@ def inject_n6b_clone_employee(conn: sqlite3.Connection) -> str | None:
 
 def inject_n6b_clone_order_and_referenced(conn: sqlite3.Connection) -> list[str]:
     """N6b Hard: Clone an order AND copy its `event_object` rows.
+
+    Before: object_Orders for ocel_id='o-990500' has a single initial row
+    (ocel_time='2023-07-13 10:58:40', price=4199.53) and a set of E2O rows
+    linking it to place/pay/confirm events. After injection, ocel_id
+    'o-990500-DUP' carries the same tuple and the same E2O membership.
 
     Because the clone participates in the same events as the original, any
     resolver that deletes the clone must first move those E2O rows onto
@@ -557,18 +587,28 @@ def _clone_object_row(
 
 
 def inject_n10_missing_object_easy(conn: sqlite3.Connection) -> str | None:
-    """N10 Easy: E2O row references a nonexistent object (`missing_side='object'`)."""
+    """N10 Easy: E2O row references a nonexistent object (`missing_side='object'`).
+
+    Before: no E2O row referenced `FAKE_OBJECT:99999`; that id does not appear
+    in `object`. After injection, one E2O row on a real event points at it.
+    """
     return inject_n10_object(conn)
 
 
 def inject_n10_missing_event(conn: sqlite3.Connection) -> str | None:
-    """N10 Medium: E2O row references a nonexistent event (`missing_side='event'`)."""
+    """N10 Medium: E2O row references a nonexistent event (`missing_side='event'`).
+
+    Before: no E2O row referenced `FAKE_EVENT:99999`; that id does not appear
+    in `event`. After injection, one E2O row from a real object points at it.
+    """
     return inject_n10_event(conn)
 
 
 def inject_n10_missing_both(conn: sqlite3.Connection) -> tuple[str, str]:
     """N10 Hard: E2O row where BOTH endpoints are nonexistent.
 
+    Before: neither `FAKE_EVENT:66666` nor `FAKE_OBJECT:66666` appears in
+    `event` or `object`.
     Hard because the resolver has no anchor context at all — neither the
     event nor the object is real.
     """
@@ -587,7 +627,11 @@ def inject_n10_missing_both(conn: sqlite3.Connection) -> tuple[str, str]:
 
 
 def inject_o2o_missing_source(conn: sqlite3.Connection) -> tuple[str, str]:
-    """O2O Easy: Source id is nonexistent, target is a real employee."""
+    """O2O Easy: Source id is nonexistent, target is a real employee.
+
+    Before: no O2O row referenced `GHOST_SRC:1`; target `Wil van der Aalst`
+    exists as an employee.
+    """
     src = "GHOST_SRC:1"
     dst = "Wil van der Aalst"
     conn.execute(
@@ -598,7 +642,11 @@ def inject_o2o_missing_source(conn: sqlite3.Connection) -> tuple[str, str]:
 
 
 def inject_o2o_missing_target(conn: sqlite3.Connection) -> tuple[str, str]:
-    """O2O Medium: Real customer references a nonexistent employee id."""
+    """O2O Medium: Real customer references a nonexistent employee id.
+
+    Before: source `Balkan Minerals d.o.o.` exists as a customer; no employee
+    or object has id `GHOST_EMP:1`.
+    """
     src = "Balkan Minerals d.o.o."
     dst = "GHOST_EMP:1"
     conn.execute(
@@ -611,6 +659,9 @@ def inject_o2o_missing_target(conn: sqlite3.Connection) -> tuple[str, str]:
 def inject_o2o_missing_both_typo(conn: sqlite3.Connection) -> tuple[str, str]:
     """O2O Hard: Both endpoints are typo near-misses of real ids.
 
+    Before: real ids are `AlpenTech Innovations AG` (customer) and
+    `Wil van der Aalst` (employee); the injected row uses one-character
+    variants of each.
     Hard because the resolver must reason about string similarity to pick
     the intended pair.
     """
