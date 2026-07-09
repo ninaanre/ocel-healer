@@ -17,8 +17,9 @@ def imports():
         MODEL,
         apply_repair,
         detect_all_with_llm,
-        ollama_ready,
+        llm_ready,
         suggest_repair,
+        set_active_model,
     )
 
     # Resolve the project root once so the dashboard works from any cwd.
@@ -33,9 +34,10 @@ def imports():
         detect_all_with_llm,
         mo,
         object_type_tables,
-        ollama_ready,
+        llm_ready,
         os,
         suggest_repair,
+        set_active_model,
     )
 
 
@@ -51,22 +53,33 @@ def header(mo):
 
 
 @app.cell
-def llm_status(MODEL, mo, ollama_ready):
-    reachable, models = ollama_ready()
-    llm_enabled = reachable and MODEL in models
+def llm_status(mo, llm_ready, set_active_model):
+    reachable, available_models = llm_ready()
     if not reachable:
-        status = mo.md(
-            f"⚠️ Ollama not reachable. The domain-expert features are disabled. "
-            f"Run `ollama serve` and `ollama pull {MODEL}` to enable them."
-        ).callout(kind="warn")
-    elif MODEL not in models:
-        status = mo.md(
-            f"⚠️ Ollama is up but model `{MODEL}` is not pulled. "
-            f"Run `ollama pull {MODEL}`. Available: {models or 'none'}."
+        _status = mo.md(
+            "⚠️ LLMs not reachable. Start Ollama Desktop or activate the SSH tunnel."
         ).callout(kind="warn")
     else:
-        status = mo.md(f"✅ LLM ready: model `{MODEL}`.").callout(kind="success")
-    status
+        _status = mo.md(
+            f"✅ LLMs reachable — {len(available_models)} model(s) available."
+        ).callout(kind="success")
+
+    model_picker = mo.ui.dropdown(
+        options=available_models if available_models else ["(none)"],
+        value=available_models[0] if available_models else "(none)",
+        label="Model",
+    ) if reachable else None
+
+    _picker_view = model_picker if reachable else mo.md("")
+    mo.vstack([_status, _picker_view], gap=0.5)
+    return model_picker, reachable
+
+
+@app.cell
+def llm_model_apply(model_picker, reachable, set_active_model):
+    llm_enabled = reachable and model_picker is not None and model_picker.value not in (None, "(none)")
+    if llm_enabled:
+        set_active_model(model_picker.value)
     return (llm_enabled,)
 
 
