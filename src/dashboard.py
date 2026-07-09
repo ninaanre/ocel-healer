@@ -140,7 +140,7 @@ def pagers(mo, results):
     # valid range. The buttons are bundled into mo.ui.dictionary so that
     # clicks in one cell flow back through marimo's reactivity graph and
     # re-run the renderer below — a plain dict would NOT propagate clicks.
-    PAGE_SIZE = 10
+    PAGE_SIZE = 5
 
     pager_buttons = mo.ui.dictionary({
         f"{key}__prev": mo.ui.button(
@@ -271,7 +271,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
         )
         heading = mo.Html(
             f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; '
-            f'margin:28px 0 10px 0;">'
+            f'margin:12px 0 10px 0;">'
             f'<span style="font-size:15px; font-weight:700; color:#1f2328;">{title}</span>'
             f'<div style="margin-top:4px;">{pills}</div>'
             f'</div>'
@@ -304,16 +304,16 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
         for label, _key, df, _ in rel_checks
     )
     rel_heading = mo.Html(
-        f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; margin:28px 0 0 0;">'
+        f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; margin:12px 0 10px 0;">'
         f'<span style="font-size:15px; font-weight:700; color:#1f2328;">Relationships</span>'
         f'<div style="margin-top:4px;">{rel_pills}</div>'
         f'</div>'
     )
     rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
-    rel_section = mo.vstack([rel_heading, mo.accordion({"Show tables": rel_tabs})], gap=0)
+    rel_section = mo.vstack([rel_heading, rel_tabs], gap=0)
 
     _auto_view = mo.vstack([obj_section, attr_section, rel_section], gap=0)
-    _auto_view if top_tab.value == "Detection" else mo.md("")
+    _auto_view if top_tab.value == "Detection" else None
     return
 
 
@@ -405,7 +405,7 @@ def expert_detection_header(mo, top_tab):
         'Confirmed flags carry over to the Resolution tab.</div>'
         '</div>'
     )
-    _header if top_tab.value == "Detection" else mo.md("")
+    _header if top_tab.value == "Detection" else None
     return
 
 
@@ -430,7 +430,7 @@ def expert_detection_controls(
     _controls_view = (
         mo.hstack([type_picker, detect_btn], justify="start", gap=1)
         if top_tab.value == "Detection"
-        else mo.md("")
+        else None
     )
     _controls_view
     return detect_btn, type_picker
