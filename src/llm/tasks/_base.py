@@ -4,7 +4,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, ClassVar, TYPE_CHECKING
 
+from pathlib import Path
+
 from src.detection.error_detection import _column_info, _object_type_tables
+from src.exploration.hint_selector import select_hints
+from src.exploration.report_store import guide_is_stale, load_guide
 from src.llm.sql_utils import quote, table_for_type
 
 if TYPE_CHECKING:
@@ -65,13 +69,16 @@ class IssueTask(ABC):
         return textwrap.dedent(self.PROMPT).strip()
 
     def build_context(self, conn: sqlite3.Connection, row: dict) -> dict:
-        """Default context: violation + candidate_types + (anchor object + events)."""
+        """Default context: violation + candidate_types + (anchor object + events)
+        + exploration hints when a fresh guide exists for this database."""
         ctx: dict[str, Any] = {"issue_key": self.issue_key, "violation": dict(row)}
         ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
         anchor_id, anchor_type = self.anchor(row)
         if anchor_id:
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
             self._attach_events(conn, ctx, anchor_id)
+        # Hints go in before extend_context so task-specific context can use them.
+        self._attach_exploration_hints(conn, ctx, row)
         self.extend_context(conn, ctx, row)
         return ctx
 
@@ -85,6 +92,40 @@ class IssueTask(ABC):
     def extend_context(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
         """Hook for task-specific context (peers, candidates, duplicates)."""
         return
+
+    def select_hints(self, guide: dict, row: dict) -> dict:
+        """Which slice of the exploration guide this task wants in its context.
+        Default: the generic row-driven selection (object type / attribute /
+        qualifier). Tasks needing a different view override this."""
+        return select_hints(guide, row)
+
+    def _attach_exploration_hints(
+        self, conn: sqlite3.Connection, ctx: dict, row: dict
+    ) -> None:
+        """Attach `exploration_hints` when a fresh guide exists for this DB.
+
+        Best-effort by design: no guide, a stale guide, or any error simply
+        means no hints — repair must work exactly as before without them.
+        """
+        try:
+            db_file = next(
+                (f for _, name, f in conn.execute("PRAGMA database_list") if name == "main"),
+                None,
+            )
+            if not db_file:
+                return
+            # Guides live next to the data: <db_dir>/exploration/<db_stem>/
+            base_dir = Path(db_file).parent / "exploration"
+            if guide_is_stale(db_file, base_dir):
+                return
+            guide = load_guide(db_file, base_dir)
+            if guide is None:
+                return
+            hints = self.select_hints(guide, row)
+            if hints:
+                ctx["exploration_hints"] = hints
+        except Exception:  # noqa: BLE001 — hints are optional, never fatal
+            return
 
     @abstractmethod
     def parse_payload(self, row: dict, payload: dict) -> "ActionResult":

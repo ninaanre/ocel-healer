@@ -1,9 +1,15 @@
+from src.exploration.hint_selector import all_type_summaries
 from src.llm.actions import ActionResult
 from src.llm.tasks._base import ResolutionTask
 
 
 class MissingObjectType(ResolutionTask):
     issue_key = "missing_object_type"
+
+    def select_hints(self, guide: dict, row: dict) -> dict:
+        # The row has no usable object_type — the task needs the overview of
+        # ALL types (what they represent + their id templates) to pick one.
+        return {"all_object_types": all_type_summaries(guide)}
 
     PROMPT = """\
         <task>
@@ -22,9 +28,11 @@ class MissingObjectType(ResolutionTask):
 
         <method>
           0. Read `violation.ocel_id` carefully — this is often the single strongest signal.
-             - A human full name (e.g. "Alessandro Berti", "Jane Smith") → employee or customer,
-               NEVER a physical object type such as package, item, or order.
-             - An identifier like "p-123456" → package; "i-880001" → item; "o-990001" → order.
+             - A human full name (e.g. "Alessandro Berti", "Jane Smith") → a person type
+               (employee/customer), NEVER a physical object type such as package, item, or order.
+             - If `exploration_hints.all_object_types` is present, match the id against each
+               type's `id_templates` (digit runs shown as `#`, e.g. `o-######`): a matching
+               template is strong evidence for that type.
           1. Read the qualifiers in `events`. The qualifier describes the ROLE this object
              plays in the event — NOT the subject of the event.
              Example: qualifier 'shipper' on activity 'send package' means this object IS the
