@@ -25,12 +25,17 @@ class MissingAttributeValue(ResolutionTask):
         </inputs>
 
         <method>
-          If `violation.attribute_name` is "weight" and the object type is product/products:
-            Look at `anchor_entity.name` or `anchor_entity.object_id` to identify the product.
-            Based solely on the product name, recall its real-world weight from your knowledge.
-            Return the weight in the same unit as `peer_objects` (check their values to determine kg vs g).
+          If `exploration_hints` are present, follow them first:
+            - `exploration_hints.attribute.repair_hint` states the log-specific
+              way to infer this attribute; `domain_knowledge_applicable` tells
+              you whether real-world knowledge may be used.
+            - If `exploration_hints.object_type.id_is_entity_name` is true, the
+              anchor's ocel_id (also in `anchor_entity.name`) is the entity's
+              real-world name — identify the entity and recall the factual
+              attribute value from your knowledge. Return it in the same
+              unit/format as `peer_objects` (check their values, e.g. kg vs g).
 
-          For all other attributes:
+          In all other cases:
             Use `peer_objects` to learn the typical value, data type, units, and format.
             Use the anchor's other attributes and events as additional signals.
         </method>
@@ -49,11 +54,6 @@ class MissingAttributeValue(ResolutionTask):
         If local context and domain knowledge are both weak, still return your best
         estimate based on the object's name and other attributes, and set confidence
         accordingly (e.g. 0.3). A low-confidence guess is always better than null.
-
-        For Products in the order-management dataset, the product name may be stored
-as the OCEL object id. If anchor_entity.name is missing, use
-anchor_entity.object_id as the product name.
-
         </output>
     """
 
@@ -72,8 +72,10 @@ anchor_entity.object_id as the product name.
             None,
         )
 
-        # In the order-management dataset, product names are encoded as ocel_id.
-        if not name and (row.get("object_type") or "").lower() in ("products", "product"):
+        # When exploration established that this type's ocel_id carries the
+        # entity's real-world name, surface it as the name for lookups.
+        hints = ctx.get("exploration_hints", {})
+        if not name and hints.get("object_type", {}).get("id_is_entity_name"):
             name = str(anchor_id) if anchor_id else None
 
         ctx["anchor_entity"] = {
