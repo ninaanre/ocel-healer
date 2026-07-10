@@ -1,8 +1,14 @@
+from src.exploration.hint_selector import all_type_summaries
 from src.llm.tasks._base import DetectionResult, DetectionTask
 
 
 class IncorrectObjectType(DetectionTask):
     issue_key = "incorrect_object_type"
+
+    def select_hints(self, guide: dict, row: dict) -> dict:
+        # The current type is under suspicion — validating it needs the
+        # overview of ALL types and their id templates, not just its own slice.
+        return {"all_object_types": all_type_summaries(guide)}
 
     PROMPT = """\
         <task>
@@ -24,6 +30,9 @@ class IncorrectObjectType(DetectionTask):
 
         <method>
           1. Compare the current `ocel_type` against the strongest signals:
+             - If `exploration_hints.all_object_types` is present, match the id against
+               each type's `id_templates` (digit runs shown as `#`): an id matching another
+               type's template while contradicting the current type is strong evidence.
              - The ID of the object — treat this as a STRONG signal on its own.
               If the ID contains a type keyword (e.g. 'user', 'customer', 'order',
               'product', 'item') that clearly contradicts the current `ocel_type`,
