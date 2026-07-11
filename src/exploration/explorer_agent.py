@@ -32,6 +32,10 @@ GUIDE_VERSION = 2
 # Fraction of name-like ids above which we assert "the id is an entity name".
 NAME_LIKE_THRESHOLD = 0.5
 
+# Stop calling the LLM after this many consecutive section failures — when the
+# host is down or the model too slow, every remaining call would fail the same way.
+ABORT_AFTER = 2
+
 EXPLORER_SYSTEM_PROMPT = """\
 You are a data analyst exploring an OCEL 2.0 event log (object-centric process data).
 You receive DATABASE EVIDENCE that was extracted deterministically from the log —
@@ -287,12 +291,40 @@ def build_guide(
     typed = list(profile.get("type_tables", {}).items())
     total_steps = 2 + len(typed)
     step = 0
+    failures_in_a_row = 0
 
     def _tick(name: str) -> None:
         nonlocal step
         step += 1
         if on_progress:
             on_progress(name, step, total_steps)
+
+    def _llm_section(name: str, fn):
+        """Run one LLM section; give up on the rest after repeated failures.
+
+        When the host is down or the model can't answer in time, every section
+        fails the same way — aborting after ABORT_AFTER consecutive failures
+        turns a ~24-minute timeout parade into one fast, clearly-reported stop.
+        Returns the section result or None when failed/skipped.
+        """
+        nonlocal failures_in_a_row
+        if failures_in_a_row >= ABORT_AFTER:
+            return None
+        try:
+            result = fn()
+        except Exception as e:  # noqa: BLE001 — degrade, don't die
+            failures_in_a_row += 1
+            warnings.append(f"{name} failed: {e}")
+            if failures_in_a_row >= ABORT_AFTER:
+                warnings.append(
+                    "aborted remaining LLM sections after "
+                    f"{ABORT_AFTER} consecutive failures — check that the LLM host "
+                    "is reachable and the model answers within the timeout "
+                    "(reasoning-heavy models may be too slow), then re-run exploration"
+                )
+            return None
+        failures_in_a_row = 0
+        return result
 
     guide: dict[str, Any] = {
         "version": GUIDE_VERSION,
@@ -310,27 +342,28 @@ def build_guide(
     }
 
     _tick("domain hypothesis")
-    try:
-        guide["domain"] = _explore_domain(profile, model)
-    except Exception as e:  # noqa: BLE001 — degrade, don't die
-        warnings.append(f"domain exploration failed: {e}")
+    domain = _llm_section("domain exploration", lambda: _explore_domain(profile, model))
+    if domain is not None:
+        guide["domain"] = domain
 
     for ocel_type, table in typed:
         _tick(f"object type: {ocel_type}")
-        try:
-            guide["object_types"][ocel_type] = _explore_object_type(
-                profile, ocel_type, table, guide["domain"]["process"], model, warnings
-            )
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f"object type {ocel_type!r} exploration failed: {e}")
+        section = _llm_section(
+            f"object type {ocel_type!r} exploration",
+            lambda t=ocel_type, tb=table: _explore_object_type(
+                profile, t, tb, guide["domain"]["process"], model, warnings
+            ),
+        )
+        if section is not None:
+            guide["object_types"][ocel_type] = section
 
     _tick("qualifier semantics")
-    try:
-        guide["qualifiers"] = _explore_qualifiers(
-            profile, guide["domain"]["process"], model, warnings
-        )
-    except Exception as e:  # noqa: BLE001
-        warnings.append(f"qualifier exploration failed: {e}")
+    qualifiers = _llm_section(
+        "qualifier exploration",
+        lambda: _explore_qualifiers(profile, guide["domain"]["process"], model, warnings),
+    )
+    if qualifiers is not None:
+        guide["qualifiers"] = qualifiers
 
     return guide
 
@@ -434,8 +467,21 @@ def explore_database(
     report_store.save_json(report_store.profile_path(db_path, base_dir), profile)
 
     guide = build_guide(profile, model=model, on_progress=on_progress)
-    report_store.save_json(report_store.guide_path(db_path, base_dir), guide)
 
+    # A run where every LLM section failed must not clobber a previous guide
+    # that has real content — keep the old files and report the failure loudly.
+    has_llm_content = bool(
+        guide["domain"]["process"] or guide["object_types"] or guide["qualifiers"]
+    )
+    previous = report_store.load_guide(db_path, base_dir)
+    previous_has_content = bool(previous and previous.get("object_types"))
+    if not has_llm_content and previous_has_content:
+        raise RuntimeError(
+            "exploration produced no LLM content — kept the previous guide. "
+            + (guide["warnings"][-1] if guide["warnings"] else "")
+        )
+
+    report_store.save_json(report_store.guide_path(db_path, base_dir), guide)
     report = render_report(guide)
     path = report_store.report_path(db_path, base_dir)
     path.write_text(report, encoding="utf-8")
