@@ -21,6 +21,7 @@ def imports():
         suggest_repair,
         set_active_model,
     )
+    from src.exploration import explore_database, guide_is_stale, load_guide, load_report
 
     # Resolve the project root once so the dashboard works from any cwd.
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +33,10 @@ def imports():
         connect_sqlite,
         detect_all,
         detect_all_with_llm,
+        explore_database,
+        guide_is_stale,
+        load_guide,
+        load_report,
         mo,
         object_type_tables,
         llm_ready,
@@ -98,6 +103,89 @@ def refresh_btn(mo):
     refresh = mo.ui.refresh(label="Re-run detection", default_interval=None)
     refresh
     return (refresh,)
+
+
+@app.cell
+def exploration_button(llm_enabled, mo):
+    explore_btn = mo.ui.run_button(
+        label="🔎 Run exploration", disabled=not llm_enabled
+    )
+    return (explore_btn,)
+
+
+@app.cell
+def exploration_run(DATA_DIR, explore_btn, explore_database, file_picker, load_guide, mo, model_picker):
+    # Runs the exploration agent for the selected log (~0.5 min per object
+    # type). The spinner subtitle mirrors the agent's per-section progress.
+    exploration_result = None
+    if explore_btn.value and file_picker.value:
+        _db = str(DATA_DIR / file_picker.value)
+        _model = model_picker.value if model_picker is not None else None
+        try:
+            with mo.status.spinner(title="Exploring the log…") as _spinner:
+                def _tick(name, i, total, _s=_spinner):
+                    _s.update(subtitle=f"{name} — step {i}/{total}")
+                explore_database(
+                    _db,
+                    model=_model,
+                    base_dir=DATA_DIR / "exploration",
+                    on_progress=_tick,
+                )
+            _warnings = (load_guide(_db, DATA_DIR / "exploration") or {}).get("warnings", [])
+            if _warnings:
+                exploration_result = mo.md(
+                    f"⚠️ Exploration finished with {len(_warnings)} warning(s) — "
+                    f"some sections may be empty. Last: `{_warnings[-1]}`"
+                ).callout(kind="warn")
+            else:
+                exploration_result = mo.md("✅ Exploration finished.").callout(kind="success")
+        except Exception as e:
+            exploration_result = mo.md(f"❌ Exploration failed: `{e}`").callout(kind="danger")
+    return (exploration_result,)
+
+
+@app.cell
+def exploration_view(
+    DATA_DIR, exploration_result, explore_btn, file_picker, guide_is_stale, load_report, mo
+):
+    _base = DATA_DIR / "exploration"
+    _db = str(DATA_DIR / file_picker.value) if file_picker.value else None
+    _report = load_report(_db, _base) if _db else ""
+    _stale = guide_is_stale(_db, _base) if _db else True
+
+    if not _report:
+        _status = mo.md(
+            "No exploration report for this log yet. Run exploration once to give "
+            "the repair agents log-specific context (id semantics, attribute hints)."
+        ).callout(kind="neutral")
+        _report_view = mo.md("")
+    else:
+        _status = (
+            mo.md(
+                "⚠️ The log's structure changed since this report was built — re-run exploration."
+            ).callout(kind="warn")
+            if _stale
+            else mo.md(
+                "✅ Exploration report is up to date — repair agents receive hints from it."
+            ).callout(kind="success")
+        )
+        _report_view = mo.accordion({
+            "📋 Exploration report": mo.md(_report).style(
+                {"max-height": "480px", "overflow-y": "auto", "padding-right": "1rem"}
+            )
+        })
+
+    mo.vstack(
+        [
+            mo.md("## Exploration"),
+            mo.hstack([explore_btn], justify="start"),
+            exploration_result or mo.md(""),
+            _status,
+            _report_view,
+        ],
+        gap=0.5,
+    )
+    return
 
 
 @app.cell
