@@ -37,11 +37,11 @@ class DuplicateObjectsOnIds(ResolutionTask):
         </method>
 
         <example>
-          duplicate_rows=[{ocel_id:'o-1', ocel_type:'customer'}, {ocel_id:'o-1', ocel_type:null}]
-          events=[{activity:'place_order', qualifier:'customer'}]
-          → {"canonical_id": "o-1",
-             "ids_to_delete": ["o-1"],
-             "rationale": "kept the row with ocel_type='customer'; events qualify this id as a customer. Marked the NULL-type row for removal.",
+          duplicate_rows=[{ocel_id:'m-1', ocel_type:'members'}, {ocel_id:'m-1', ocel_type:null}]
+          events=[{activity:'register member', qualifier:'member'}]
+          → {"canonical_id": "m-1",
+             "ids_to_delete": ["m-1"],
+             "rationale": "kept the row with ocel_type='members'; events qualify this id as a member. Marked the NULL-type row for removal.",
              "confidence": 0.9}
         </example>
 
