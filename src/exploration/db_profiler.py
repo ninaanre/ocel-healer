@@ -77,25 +77,22 @@ _PREFIXED_ID = re.compile(r"^[a-zA-Z]+[-_:]\d+")
 _NUMERIC_ID = re.compile(r"^\d+$")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-# MVP heuristic for recognisable consumer product names.
-_PRODUCT_KEYWORDS = (
-    "ipad", "iphone", "kindle", "echo", "macbook", "galaxy",
-    "watch", "airpods", "camera", "laptop", "tablet", "fire",
-)
-
 
 def classify_id(value: str) -> str:
-    """Classify one identifier into a coarse shape bucket."""
+    """Classify one identifier into a coarse shape bucket.
+
+    Deliberately dataset-agnostic: only structural signals (regex shapes,
+    whitespace), no keyword lists tuned to a particular log's content.
+    Known limitation: single-word entity names ("Echo") land in
+    opaque_token_like — the name-likeness of a type rests on its multi-word
+    and human-name ids."""
     v = value.strip()
-    lower = v.lower()
     if _EMAIL.match(v):
         return "email_like"
     if _PREFIXED_ID.match(v):
         return "prefixed_id_like"
     if _NUMERIC_ID.match(v):
         return "numeric_id_like"
-    if any(k in lower for k in _PRODUCT_KEYWORDS):
-        return "product_name_like"
     if _HUMAN_NAME.match(v):
         return "human_name_like"
     if " " in v:
@@ -104,7 +101,7 @@ def classify_id(value: str) -> str:
 
 
 # Buckets whose values carry a real-world entity name usable for lookups.
-NAME_LIKE_BUCKETS = {"human_name_like", "product_name_like", "natural_language_like"}
+NAME_LIKE_BUCKETS = {"human_name_like", "natural_language_like"}
 
 # Fraction of name-like ids above which we assert "the id is an entity name".
 NAME_LIKE_THRESHOLD = 0.5
