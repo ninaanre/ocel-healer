@@ -106,6 +106,30 @@ def classify_id(value: str) -> str:
 # Buckets whose values carry a real-world entity name usable for lookups.
 NAME_LIKE_BUCKETS = {"human_name_like", "product_name_like", "natural_language_like"}
 
+# Fraction of name-like ids above which we assert "the id is an entity name".
+NAME_LIKE_THRESHOLD = 0.5
+
+# A string column whose sample has at most this many distinct values is treated
+# as categorical, and the sample as its observed vocabulary.
+VOCAB_MAX = 10
+
+
+def known_values_from_samples(samples: list[Any]) -> list[str] | None:
+    """Observed value vocabulary for low-cardinality *string* columns, or None.
+
+    Two deliberate restrictions, both learned from dirty data:
+      - strings only — numeric columns with few distinct values are usually
+        continuous quantities thinned out by missing values, not categories;
+      - callers must treat the list as "observed", never "complete": the very
+        corruption being repaired may have wiped a whole category out of the
+        sample (e.g. all 'Sales' employees had their role nulled).
+    """
+    if not (0 < len(samples) <= VOCAB_MAX):
+        return None
+    if not all(isinstance(v, str) for v in samples):
+        return None
+    return samples
+
 
 def detect_id_patterns(values: list[Any]) -> dict[str, Any]:
     """Bucket identifiers by shape and estimate how name-like they are.
@@ -172,6 +196,9 @@ def per_type_id_patterns(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
         ]
         pattern = detect_id_patterns(ids)
         pattern["templates"] = id_templates(ids)
+        pattern["id_is_entity_name"] = (
+            pattern["name_like_fraction"] >= NAME_LIKE_THRESHOLD
+        )
         out[t] = pattern
     return out
 
@@ -317,6 +344,7 @@ def profile_database(db_path: str | Path) -> dict[str, Any]:
             "qualifier_context": {},
             "attribute_null_rates": {},
             "attribute_samples": {},
+            "attribute_known_values": {},
         }
 
         for table in tables:
@@ -324,8 +352,13 @@ def profile_database(db_path: str | Path) -> dict[str, Any]:
             count = conn.execute(f"SELECT COUNT(*) FROM {quote(table)}").fetchone()[0]
             profile["tables"][table] = {"row_count": count, "columns": cols}
             for col in cols:
-                profile["attribute_null_rates"][f"{table}.{col}"] = null_rate(conn, table, col)
-                profile["attribute_samples"][f"{table}.{col}"] = sample_values(conn, table, col)
+                key = f"{table}.{col}"
+                samples = sample_values(conn, table, col)
+                profile["attribute_null_rates"][key] = null_rate(conn, table, col)
+                profile["attribute_samples"][key] = samples
+                vocabulary = known_values_from_samples(samples)
+                if vocabulary is not None:
+                    profile["attribute_known_values"][key] = vocabulary
 
         if "object" in tables and "ocel_type" in profile["tables"]["object"]["columns"]:
             profile["object_types"] = _type_counts(conn, "object")

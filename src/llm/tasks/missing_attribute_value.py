@@ -26,6 +26,15 @@ class MissingAttributeValue(ResolutionTask):
 
         <method>
           If `exploration_hints` are present, follow them first:
+            - If `exploration_hints.attribute.known_values` is present, these are
+              values this column is OBSERVED to take in this log (the list may be
+              incomplete when many rows are missing). Strongly prefer returning
+              one of them verbatim: map the evidence onto the closest listed
+              value — e.g. known_values ["Gold", "Silver"] and the evidence
+              says "silver tier" → answer "Silver". Only if the evidence
+              clearly points to a category missing from the list, answer with
+              that category formatted in the same style as the listed values —
+              never echo the evidence's wording verbatim.
             - `exploration_hints.attribute.repair_hint` states the log-specific
               way to infer this attribute; `domain_knowledge_applicable` tells
               you whether real-world knowledge may be used.

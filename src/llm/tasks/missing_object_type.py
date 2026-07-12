@@ -6,10 +6,10 @@ from src.llm.tasks._base import ResolutionTask
 class MissingObjectType(ResolutionTask):
     issue_key = "missing_object_type"
 
-    def select_hints(self, guide: dict, row: dict) -> dict:
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
         # The row has no usable object_type — the task needs the overview of
         # ALL types (what they represent + their id templates) to pick one.
-        return {"all_object_types": all_type_summaries(guide)}
+        return {"all_object_types": all_type_summaries(profile, guide)}
 
     PROMPT = """\
         <task>
@@ -31,7 +31,7 @@ class MissingObjectType(ResolutionTask):
              - A human full name (e.g. "Alessandro Berti", "Jane Smith") → a person type
                (employee/customer), NEVER a physical object type such as package, item, or order.
              - If `exploration_hints.all_object_types` is present, match the id against each
-               type's `id_templates` (digit runs shown as `#`, e.g. `o-######`): a matching
+               type's `id_template` (digit runs shown as `#`, e.g. `o-######`): a matching
                template is strong evidence for that type.
           1. Read the qualifiers in `events`. The qualifier describes the ROLE this object
              plays in the event — NOT the subject of the event.

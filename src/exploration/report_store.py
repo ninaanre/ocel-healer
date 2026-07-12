@@ -39,14 +39,21 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def load_guide(db_path: str | Path, base_dir: str | Path = DEFAULT_BASE_DIR) -> dict[str, Any] | None:
-    p = guide_path(db_path, base_dir)
+def _load_json(p: Path) -> dict[str, Any] | None:
     if not p.exists():
         return None
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def load_guide(db_path: str | Path, base_dir: str | Path = DEFAULT_BASE_DIR) -> dict[str, Any] | None:
+    return _load_json(guide_path(db_path, base_dir))
+
+
+def load_profile(db_path: str | Path, base_dir: str | Path = DEFAULT_BASE_DIR) -> dict[str, Any] | None:
+    return _load_json(profile_path(db_path, base_dir))
 
 
 def load_report(db_path: str | Path, base_dir: str | Path = DEFAULT_BASE_DIR) -> str:
