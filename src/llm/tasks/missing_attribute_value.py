@@ -63,6 +63,11 @@ class MissingAttributeValue(ResolutionTask):
         If local context and domain knowledge are both weak, still return your best
         estimate based on the object's name and other attributes, and set confidence
         accordingly (e.g. 0.3). A low-confidence guess is always better than null.
+
+        For numeric attributes return a BARE number (0.46, not "0.46 kg" and not
+        "460 grams"): unit suffixes make the value unwritable to the column.
+        Peer values show the column's implicit unit and format — express your
+        answer the same way.
         </output>
     """
 
