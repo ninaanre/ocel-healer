@@ -28,28 +28,28 @@ class MissingObjectType(ResolutionTask):
 
         <method>
           0. Read `violation.ocel_id` carefully — this is often the single strongest signal.
-             - A human full name (e.g. "Alessandro Berti", "Jane Smith") → a person type
-               (employee/customer), NEVER a physical object type such as package, item, or order.
+             - A human full name (e.g. "Maria Garcia", "John Smith") → a person type from
+               `candidate_types`, NEVER a physical-object or document type.
              - If `exploration_hints.all_object_types` is present, match the id against each
-               type's `id_template` (digit runs shown as `#`, e.g. `o-######`): a matching
-               template is strong evidence for that type.
+               type's `id_template` (digit runs shown as `#`): a matching template is strong
+               evidence for that type.
           1. Read the qualifiers in `events`. The qualifier describes the ROLE this object
              plays in the event — NOT the subject of the event.
-             Example: qualifier 'shipper' on activity 'send package' means this object IS the
-             shipper (a person), NOT the package being shipped.
-             Qualifiers like 'shipper', 'handler', 'picker', 'worker' → person type (employee).
-             Qualifier 'customer' → customer type.
-          2. Attribute names in `object.attributes` reinforce: `email`/`country` → customer;
-             `role`/`department` → employee; `price`/`weight` → product or item.
+             Example: qualifier 'borrower' on activity 'lend book' means this object IS the
+             borrower (a person), NOT the book being lent.
+             A qualifier naming a human role → the matching person type in `candidate_types`.
+          2. Attribute names in `object.attributes` reinforce the choice: person-like
+             attributes (e.g. `email`, `role`) → a person type; goods-like attributes
+             (e.g. `price`, `weight`) → a goods type.
           3. Pick exactly one value from `candidate_types`. If multiple fit,
              choose the one whose name best matches the id + qualifiers seen.
         </method>
 
         <example>
-          violation.ocel_id='Alessandro Berti'
-          events=[{activity:'send package', qualifier:'shipper'}, {activity:'deliver package', qualifier:'shipper'}]
-          candidate_types=['employees', 'customers', 'packages', 'items', 'orders']
-          → {"inferred_type": "employees", "rationale": "'Alessandro Berti' is a human name; qualifier 'shipper' is the role this person plays — they ship packages, they are not a package", "confidence": 0.95}
+          violation.ocel_id='Maria Garcia'
+          events=[{activity:'lend book', qualifier:'librarian'}, {activity:'return book', qualifier:'librarian'}]
+          candidate_types=['members', 'books', 'librarians', 'loans']
+          → {"inferred_type": "librarians", "rationale": "'Maria Garcia' is a human name; qualifier 'librarian' is the role this person plays — they lend books, they are not a book", "confidence": 0.95}
         </example>
 
         <output>

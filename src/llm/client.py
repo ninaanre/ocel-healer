@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
     1. LOCAL_CONTEXT: values explicitly present in the provided OCEL context.
     2. DOMAIN_KNOWLEDGE: stable real-world knowledge about well-known entities,
    but only when the missing attribute is a factual, entity-specific attribute
-   such as product weight, release year, manufacturer, or standard category.
+   such as a book's publication year, a city's country, or a device's manufacturer.
 
     The context may also include `exploration_hints`: log-specific knowledge
     produced by a prior exploration phase and validated against this database

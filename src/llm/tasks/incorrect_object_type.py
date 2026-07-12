@@ -34,14 +34,15 @@ class IncorrectObjectType(DetectionTask):
                each type's `id_template` (digit runs shown as `#`): an id matching another
                type's template while contradicting the current type is strong evidence.
              - The ID of the object — treat this as a STRONG signal on its own.
-              If the ID contains a type keyword (e.g. 'user', 'customer', 'order',
-              'product', 'item') that clearly contradicts the current `ocel_type`,
-              this alone is sufficient evidence to flag a mismatch. Do NOT treat a
-              contradicting ID as "weak" just because events or attributes are absent.
-             - Activity names + qualifiers in `events` (e.g. activity 'place_order'
-               with qualifier 'customer' implies the customer type).
-             - Attribute names/shapes in `object.attributes` (e.g. `email`,
-               `country` → customer; `sku`, `price` → product).
+              If the ID contains a word that names one of the `candidate_types`
+              (or an obvious synonym of one) and that clearly contradicts the
+              current `ocel_type`, this alone is sufficient evidence to flag a
+              mismatch. Do NOT treat a contradicting ID as "weak" just because
+              events or attributes are absent.
+             - Activity names + qualifiers in `events`: the qualifier names the
+               role the object plays, which usually pins its type.
+             - Attribute names/shapes in `object.attributes`: person-like
+               attributes (e.g. `email`) vs goods-like attributes (e.g. `price`).
           2. If the current type is consistent with all signals, return
             `inferred_type: null`. A contradicting ID keyword alone is NOT
             "weak/ambiguous" — it IS strong evidence. Only default to null
@@ -55,26 +56,26 @@ class IncorrectObjectType(DetectionTask):
         </method>
 
         <example>
-          violation={ocel_id:'O42', ocel_type:'product'}
-          events=[{activity:'place_order', qualifier:'customer'}, {activity:'ship_order', qualifier:'customer'}]
-          object.attributes={email:'a@b.com', country:'DE'}
-          candidate_types=['customer', 'order', 'product']
-          → {"inferred_type": "customer", "rationale": "qualifier 'customer' on both events and email/country attributes contradict the current 'product' tag", "confidence": 0.95}
+          violation={ocel_id:'M42', ocel_type:'books'}
+          events=[{activity:'lend book', qualifier:'member'}, {activity:'return book', qualifier:'member'}]
+          object.attributes={email:'a@b.com', joined:'2020-01-01'}
+          candidate_types=['members', 'books', 'loans']
+          → {"inferred_type": "members", "rationale": "qualifier 'member' on both events and the email attribute contradict the current 'books' tag", "confidence": 0.95}
         </example>
 
         <example>
-          violation={ocel_id:'O7', ocel_type:'order'}
-          events=[{activity:'place_order', qualifier:'order'}]
-          candidate_types=['customer', 'order', 'product']
-          → {"inferred_type": null, "rationale": "events qualify this object as 'order', matching the current type", "confidence": 0.95}
+          violation={ocel_id:'L7', ocel_type:'loans'}
+          events=[{activity:'open loan', qualifier:'loan'}]
+          candidate_types=['members', 'books', 'loans']
+          → {"inferred_type": null, "rationale": "events qualify this object as 'loan', matching the current type", "confidence": 0.95}
         </example>
 
         <example>
-          violation={ocel_id:'product124', ocel_type:'order'}
+          violation={ocel_id:'book124', ocel_type:'loans'}
           events=[]
           object.attributes={}
-          candidate_types=['customer', 'order', 'product']
-          → {"inferred_type": "product", "rationale": "ID 'product124' contains keyword 'product' which contradicts the current 'order' type; no events or attributes present but the ID signal is sufficient", "confidence": 0.85}
+          candidate_types=['members', 'books', 'loans']
+          → {"inferred_type": "books", "rationale": "ID 'book124' contains the word 'book' which contradicts the current 'loans' type; no events or attributes present but the ID signal is sufficient", "confidence": 0.85}
         </example>
 
         <output>
