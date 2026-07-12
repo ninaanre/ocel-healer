@@ -7,8 +7,9 @@ from typing import Any, ClassVar, TYPE_CHECKING
 from pathlib import Path
 
 from src.detection.error_detection import _column_info, _object_type_tables
+from src.exploration.db_profiler import schema_fingerprint
 from src.exploration.hint_selector import select_hints
-from src.exploration.report_store import guide_is_stale, load_guide
+from src.exploration.report_store import load_guide, load_profile
 from src.llm.sql_utils import quote, table_for_type
 
 if TYPE_CHECKING:
@@ -68,9 +69,14 @@ class IssueTask(ABC):
     def prompt(self) -> str:
         return textwrap.dedent(self.PROMPT).strip()
 
-    def build_context(self, conn: sqlite3.Connection, row: dict) -> dict:
+    def build_context(
+        self, conn: sqlite3.Connection, row: dict, *, use_hints: bool = True
+    ) -> dict:
         """Default context: violation + candidate_types + (anchor object + events)
-        + exploration hints when a fresh guide exists for this database."""
+        + exploration hints when a fresh guide exists for this database.
+
+        `use_hints=False` skips the guide lookup — the evaluation uses it to
+        compare repair quality with and without exploration knowledge."""
         ctx: dict[str, Any] = {"issue_key": self.issue_key, "violation": dict(row)}
         ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
         anchor_id, anchor_type = self.anchor(row)
@@ -78,7 +84,8 @@ class IssueTask(ABC):
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
             self._attach_events(conn, ctx, anchor_id)
         # Hints go in before extend_context so task-specific context can use them.
-        self._attach_exploration_hints(conn, ctx, row)
+        if use_hints:
+            self._attach_exploration_hints(conn, ctx, row)
         self.extend_context(conn, ctx, row)
         return ctx
 
@@ -93,19 +100,22 @@ class IssueTask(ABC):
         """Hook for task-specific context (peers, candidates, duplicates)."""
         return
 
-    def select_hints(self, guide: dict, row: dict) -> dict:
-        """Which slice of the exploration guide this task wants in its context.
-        Default: the generic row-driven selection (object type / attribute /
-        qualifier). Tasks needing a different view override this."""
-        return select_hints(guide, row)
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
+        """Which exploration slice this task wants in its context. Facts come
+        from the profile, interpretations from the (optional) guide. Default:
+        the generic row-driven selection (object type / attribute / qualifier).
+        Tasks needing a different view override this."""
+        return select_hints(profile, guide, row)
 
     def _attach_exploration_hints(
         self, conn: sqlite3.Connection, ctx: dict, row: dict
     ) -> None:
-        """Attach `exploration_hints` when a fresh guide exists for this DB.
+        """Attach `exploration_hints` when fresh exploration artifacts exist.
 
-        Best-effort by design: no guide, a stale guide, or any error simply
-        means no hints — repair must work exactly as before without them.
+        The deterministic profile is required; the LLM guide is optional —
+        facts-only hints are still valuable when guide sections failed.
+        Best-effort by design: missing/stale artifacts or any error simply
+        mean no hints — repair must work exactly as before without them.
         """
         try:
             db_file = next(
@@ -114,14 +124,18 @@ class IssueTask(ABC):
             )
             if not db_file:
                 return
-            # Guides live next to the data: <db_dir>/exploration/<db_stem>/
+            # Artifacts live next to the data: <db_dir>/exploration/<db_stem>/
             base_dir = Path(db_file).parent / "exploration"
-            if guide_is_stale(db_file, base_dir):
+            profile = load_profile(db_file, base_dir)
+            if profile is None:
+                return
+            current = schema_fingerprint(conn)
+            if profile.get("schema_fingerprint") != current:
                 return
             guide = load_guide(db_file, base_dir)
-            if guide is None:
-                return
-            hints = self.select_hints(guide, row)
+            if guide is not None and guide.get("source_fingerprint") != current:
+                guide = None  # stale guide: keep the facts, drop the prose
+            hints = self.select_hints(profile, guide, row)
             if hints:
                 ctx["exploration_hints"] = hints
         except Exception:  # noqa: BLE001 — hints are optional, never fatal

@@ -27,10 +27,10 @@ from src.exploration import report_store
 from src.exploration.db_profiler import profile_database
 from src.llm.client import call_llm
 
-GUIDE_VERSION = 2
-
-# Fraction of name-like ids above which we assert "the id is an entity name".
-NAME_LIKE_THRESHOLD = 0.5
+# v3: the guide carries only LLM interpretations; deterministic facts (id
+# templates, vocabularies, null rates, outliers) live in the profile and are
+# merged into hints/reports from there.
+GUIDE_VERSION = 3
 
 # Stop calling the LLM after this many consecutive section failures — when the
 # host is down or the model too slow, every remaining call would fail the same way.
@@ -212,19 +212,12 @@ Schema:
             "domain_knowledge_applicable": _as_bool(a.get("domain_knowledge_applicable")),
             "null_expected_by_design": _as_bool(a.get("null_expected_by_design")),
             "repair_hint": _as_str(a.get("repair_hint")),
-            "null_rate": columns[col]["null_rate"],
         }
 
-    name_like = id_patterns.get("name_like_fraction", 0.0)
     return {
         "table": table,
         "represents": _as_str(payload.get("represents")),
         "id_note": _as_str(payload.get("id_note")),
-        # Deterministic: computed from ID shape buckets, not LLM opinion.
-        "id_is_entity_name": name_like >= NAME_LIKE_THRESHOLD,
-        "id_name_like_fraction": name_like,
-        "id_patterns": id_patterns.get("buckets", {}),
-        "id_templates": id_patterns.get("templates", []),
         "attributes": attributes,
     }
 
@@ -334,10 +327,6 @@ def build_guide(
         "domain": {"process": "", "evidence": [], "confidence": "low"},
         "object_types": {},
         "qualifiers": {},
-        # Deterministic facts from the profiler, recorded verbatim: qualifiers
-        # dominated by one object type plus the minority objects breaking the
-        # pattern — ready-made candidates for incorrect_object_type detection.
-        "qualifier_outliers": profile.get("qualifier_outliers", {}),
         "warnings": warnings,
     }
 
@@ -368,22 +357,12 @@ def build_guide(
     return guide
 
 
-def _is_notable(attr: dict) -> bool:
-    """An attribute earns a report row only when a reader must know something
-    about it: it has missing values, domain knowledge applies, or its NULLs
-    are structural. Boilerplate columns stay in the guide JSON only."""
-    return bool(
-        (attr["null_rate"] or 0) > 0
-        or attr["domain_knowledge_applicable"]
-        or attr["null_expected_by_design"]
-    )
+def render_report(profile: dict, guide: dict) -> str:
+    """Render exploration results as a compact human-readable Markdown report.
 
-
-def render_report(guide: dict) -> str:
-    """Render the validated guide as a compact human-readable Markdown report.
-
-    The report is a summary for people; the machine-facing source of truth is
-    exploration_guide.json, which keeps every attribute in full detail.
+    Facts (id templates, null rates, vocabularies, anomalies) come from the
+    profile; interpretations (process, meanings, repair hints) from the guide.
+    The machine-facing sources of truth stay in the two JSON files.
     """
     d = guide["domain"]
     lines = [
@@ -400,30 +379,45 @@ def render_report(guide: dict) -> str:
 
     lines += ["", "## 2. Object Types", ""]
     for t, info in guide["object_types"].items():
-        templates = info.get("id_templates", [])
+        table = info["table"]
+        patterns = profile.get("object_id_patterns_by_type", {}).get(t, {})
+        templates = patterns.get("templates", [])
         template_note = (
             f" — dominant pattern `{templates[0]['template']}` ({templates[0]['share']:.0%})"
             if templates and templates[0]["share"] >= 0.5 else ""
         )
+        entity_name = patterns.get("id_is_entity_name", False)
         lines += [
-            f"### {t}  (`{info['table']}`)",
+            f"### {t}  (`{table}`)",
             "",
             f"- **Represents:** {info['represents'] or '_?_'}",
             f"- **IDs:** {info['id_note'] or '_?_'}{template_note} "
-            f"(usable as entity name: **{'yes' if info['id_is_entity_name'] else 'no'}**)",
+            f"(usable as entity name: **{'yes' if entity_name else 'no'}**)",
         ]
-        notable = {c: a for c, a in info["attributes"].items() if _is_notable(a)}
+
+        def _null_rate(col: str) -> float:
+            return profile.get("attribute_null_rates", {}).get(f"{table}.{col}") or 0
+
+        notable = {
+            c: a for c, a in info["attributes"].items()
+            if _null_rate(c) > 0
+            or a["domain_knowledge_applicable"]
+            or a["null_expected_by_design"]
+            or f"{table}.{c}" in profile.get("attribute_known_values", {})
+        }
         if notable:
             lines += [
                 "",
-                "| attribute | null rate | meaning | value source | domain knowledge | NULL by design | repair hint |",
-                "|---|---|---|---|---|---|---|",
+                "| attribute | null rate | meaning | value source | domain knowledge | NULL by design | known values | repair hint |",
+                "|---|---|---|---|---|---|---|---|",
             ]
             for col, a in notable.items():
+                vocabulary = profile.get("attribute_known_values", {}).get(f"{table}.{col}")
                 lines.append(
-                    f"| `{col}` | {a['null_rate']} | {a['meaning']} | {a['value_source']} | "
+                    f"| `{col}` | {_null_rate(col)} | {a['meaning']} | {a['value_source']} | "
                     f"{'yes' if a['domain_knowledge_applicable'] else 'no'} | "
-                    f"{'yes' if a['null_expected_by_design'] else 'no'} | {a['repair_hint']} |"
+                    f"{'yes' if a['null_expected_by_design'] else 'no'} | "
+                    f"{', '.join(vocabulary) if vocabulary else '—'} | {a['repair_hint']} |"
                 )
         else:
             lines.append("- _No attributes need special attention._")
@@ -432,7 +426,7 @@ def render_report(guide: dict) -> str:
     lines += ["## 3. Qualifier Semantics", ""]
     lines += [f"- `{q}`: {role or '_?_'}" for q, role in guide["qualifiers"].items()]
 
-    outliers = guide.get("qualifier_outliers", {})
+    outliers = profile.get("qualifier_outliers", {})
     if outliers:
         lines += ["", "## 4. Qualifier Anomalies (deterministic)", ""]
         for q, info in outliers.items():
@@ -482,7 +476,7 @@ def explore_database(
         )
 
     report_store.save_json(report_store.guide_path(db_path, base_dir), guide)
-    report = render_report(guide)
+    report = render_report(profile, guide)
     path = report_store.report_path(db_path, base_dir)
     path.write_text(report, encoding="utf-8")
     return path
