@@ -17,13 +17,18 @@ def _build_user_prompt(task, ctx: dict) -> str:
     )
 
 
-def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
-    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure)."""
+def suggest_repair(
+    issue_key: str, row: dict, sqlite_path: str, *, use_hints: bool = True
+) -> dict:
+    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure).
+
+    `use_hints=False` builds the context without exploration hints — used by
+    the evaluation to measure the hints' effect."""
     task = get_task(issue_key)
     if task is None:
         return actions.unknown_issue_noop(issue_key)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row)
+        ctx = task.build_context(conn, row, use_hints=use_hints)
     payload = call_llm(_build_user_prompt(task, ctx))
     return actions.from_task_result(task, row, payload)
 
