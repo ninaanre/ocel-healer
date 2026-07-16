@@ -5,8 +5,14 @@ row per detector on top of the clean-DB baseline.  Values are asserted as
 ``>=`` because injecting a NULL object type causes a cascade in the two
 dangling-relationship detectors (every relationship referencing the retyped
 object also becomes dangling), and that cascade grows/shrinks with the
-dataset.  Regression on the `legacy` level is asserted with a hardcoded
-snapshot so accidental changes to the pre-existing dirty output are caught.
+dataset. The M5 (`missing_object`) injectors also add rows that trip
+``dangling_e2o_relationship`` — this is intentional: the same violation
+surfaces in both detectors and the dashboard routes it to the appropriate
+grid cell. The new ``missing_event`` injectors are analogous: they trip
+both ``missing_event`` and ``dangling_e2o_relationship`` (from opposite
+sides of the same E2O row).  Regression on the `legacy` level is asserted
+with a hardcoded snapshot so accidental changes to the pre-existing dirty
+output are caught.
 """
 
 from __future__ import annotations
@@ -19,6 +25,10 @@ from src.detection.error_detection import detect_all
 RULE_DETECTORS = (
     "missing_object_type",
     "missing_attribute_value",
+    "missing_event",
+    "missing_event_type",
+    "missing_event_timestamp",
+    "missing_object",
     "duplicate_objects_on_ids",
     "duplicate_objects_on_attributes",
     "incorrect_attribute_datatype",
@@ -32,6 +42,10 @@ RULE_DETECTORS = (
 CLEAN_BASELINE = {
     "missing_object_type":              0,
     "missing_attribute_value":          0,
+    "missing_event":                    0,
+    "missing_event_type":               0,
+    "missing_event_timestamp":          0,
+    "missing_object":                   0,
     "duplicate_objects_on_ids":         0,
     "duplicate_objects_on_attributes":  384,
     "incorrect_attribute_datatype":     0,
@@ -41,10 +55,18 @@ CLEAN_BASELINE = {
 
 # Snapshot of the counts produced by the pre-tier `corrupt_database` body,
 # captured after regenerating the dirty DB fresh.  If this changes, the
-# legacy path has drifted and existing demos may need re-recording.
+# legacy path has drifted and existing demos may need re-recording. The
+# `missing_event=1` entry comes from the legacy `inject_n10_event` injector,
+# which inserts an E2O row referencing a fake event id — the new
+# `detect_missing_event` picks that up as well as the existing
+# `dangling_e2o_relationship` detector.
 LEGACY_SNAPSHOT = {
     "missing_object_type":              1,
     "missing_attribute_value":          0,
+    "missing_event":                    1,
+    "missing_event_type":               0,
+    "missing_event_timestamp":          0,
+    "missing_object":                   0,
     "duplicate_objects_on_ids":         1,
     "duplicate_objects_on_attributes":  385,
     "incorrect_attribute_datatype":     0,

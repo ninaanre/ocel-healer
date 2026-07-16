@@ -37,6 +37,17 @@ def _object_type_tables(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     return [(t, f"object_{m}") for t, m in rows]
 
 
+def _event_type_tables(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return (event_type, table_name) pairs.
+
+    Mirrors `_object_type_tables`. `event_map_type.ocel_type_map` stores the
+    CamelCase suffix (e.g. `PlaceOrder`) and the per-type table is named
+    `event_<suffix>` (e.g. `event_PlaceOrder`).
+    """
+    rows = conn.execute("SELECT ocel_type, ocel_type_map FROM event_map_type").fetchall()
+    return [(t, f"event_{m}") for t, m in rows]
+
+
 def _column_info(conn: sqlite3.Connection, table: str) -> list[tuple[str, str]]:
     """Return [(column_name, declared_type)] for a table, skipping reserved cols."""
     info = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
@@ -277,6 +288,144 @@ def detect_missing_object_type(src: SqliteInput) -> pl.DataFrame:
     )
 
 
+def detect_missing_event_timestamp(src: SqliteInput) -> pl.DataFrame:
+    """Find events whose ocel_time is NULL or empty/whitespace.
+
+    `ocel_time` lives on the per-type sub-tables (`event_<CamelCase>`), not
+    on `event` itself. This scans every event sub-table and reports the
+    concrete target_table for the resolver to UPDATE.
+    """
+    with _connect(src) as conn:
+        rows: list[dict] = []
+        for event_type, table in _event_type_tables(conn):
+            if not _has_column(conn, table, "ocel_time"):
+                continue
+            for ocel_id, ocel_time in conn.execute(
+                f'SELECT ocel_id, ocel_time FROM "{table}"'
+            ).fetchall():
+                if _is_missing(ocel_time):
+                    rows.append({
+                        "ocel_id": ocel_id,
+                        "event_type": event_type,
+                        "target_table": table,
+                        "actual_value": ocel_time,
+                        "issue": "missing_event_timestamp",
+                    })
+    return _frame(
+        rows,
+        ["ocel_id", "event_type", "target_table", "actual_value", "issue"],
+    )
+
+
+def detect_missing_event(src: SqliteInput) -> pl.DataFrame:
+    """Find event_object rows that reference an event id that has no row in
+    the main `event` table.
+
+    Counterpart to ``detect_missing_object``: the same rows also trip
+    ``dangling_e2o_relationship`` (from the event side), but where the
+    dangling task swaps to a plausible existing event, this task proposes
+    creating the missing one. The dashboard routes them apart.
+
+    Unlike missing_object we don't require a `<type>:` prefix on the id —
+    the resolver infers the type from the qualifier + linked object types.
+    """
+    with _connect(src) as conn:
+        known_event_ids = {
+            r[0] for r in conn.execute("SELECT ocel_id FROM event").fetchall()
+        }
+        rows: list[dict] = []
+        for ocel_event_id, ocel_object_id, ocel_qualifier in conn.execute(
+            "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object"
+        ).fetchall():
+            if ocel_event_id is None or ocel_event_id in known_event_ids:
+                continue
+            rows.append({
+                "ocel_event_id":   ocel_event_id,
+                "ocel_object_id":  ocel_object_id,
+                "ocel_qualifier":  ocel_qualifier,
+                "issue":           "missing_event",
+            })
+    return _frame(
+        rows,
+        ["ocel_event_id", "ocel_object_id", "ocel_qualifier", "issue"],
+    )
+
+
+def detect_missing_event_type(src: SqliteInput) -> pl.DataFrame:
+    """Find events in the main event table whose ocel_type is NULL or
+    empty/whitespace.
+
+    Mirrors ``detect_missing_object_type`` on the event side.
+    """
+    with _connect(src) as conn:
+        events = pl.read_database("SELECT ocel_id, ocel_type FROM event", conn)
+
+    cols = ["ocel_id", "ocel_type", "issue"]
+    return (
+        events
+        .filter(
+            pl.col("ocel_type").is_null()
+            | (pl.col("ocel_type").str.strip_chars() == "")
+        )
+        .with_columns(pl.lit("missing_event_type").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
+def detect_missing_object(src: SqliteInput) -> pl.DataFrame:
+    """Find event_object rows that reference an object id that doesn't exist
+    in `object`, but whose id shape (a ``<type>:`` prefix from a real
+    object_type) suggests it was meant to exist.
+
+    This is the counterpart to ``dangling_e2o_relationship``: the same rows
+    also trip that detector, but where the dangling task swaps to a
+    plausible existing object, this task proposes creating the missing one.
+    Routing to the correct issue is a dashboard concern (see _mapping).
+    """
+    with _connect(src) as conn:
+        known_ids = {
+            r[0] for r in conn.execute("SELECT ocel_id FROM object").fetchall()
+        }
+        # Type prefixes we consider legitimate (e.g. `orders:`, `items:`).
+        prefixes = [ocel_type for ocel_type, _ in _object_type_tables(conn)]
+        # Products don't follow the `<type>:<id>` convention; their `ocel_id`
+        # is a bare product name. We rely purely on the referring qualifier
+        # `product` to catch those.
+        rows: list[dict] = []
+        for ocel_event_id, ocel_object_id, ocel_qualifier in conn.execute(
+            "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object"
+        ).fetchall():
+            if ocel_object_id in known_ids or ocel_object_id is None:
+                continue
+            # Match by `<type>:` prefix, else by qualifier hint.
+            inferred = None
+            for ptype in prefixes:
+                if isinstance(ocel_object_id, str) and ocel_object_id.startswith(f"{ptype}:"):
+                    inferred = ptype
+                    break
+            if inferred is None and ocel_qualifier == "product":
+                inferred = "products"
+            if inferred is None:
+                # Opaque id (no prefix, no qualifier hint) → leave to the
+                # dangling detector; we'd only be guessing.
+                continue
+            rows.append({
+                "ocel_object_id": ocel_object_id,
+                "inferred_type_from_prefix": inferred,
+                "ocel_event_id": ocel_event_id,
+                "ocel_qualifier": ocel_qualifier,
+                "issue": "missing_object",
+            })
+    return _frame(
+        rows,
+        [
+            "ocel_object_id", "inferred_type_from_prefix",
+            "ocel_event_id", "ocel_qualifier", "issue",
+        ],
+    )
+
+
 def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
     """Find event-to-object relationships referencing a non-existent event,
     a non-existent object, or both.
@@ -343,4 +492,8 @@ def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
         "incorrect_attribute_datatype":     detect_incorrect_attribute_datatype(src),
         "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
         "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
+        "missing_event_timestamp":          detect_missing_event_timestamp(src),
+        "missing_event":                    detect_missing_event(src),
+        "missing_event_type":               detect_missing_event_type(src),
+        "missing_object":                   detect_missing_object(src),
     }

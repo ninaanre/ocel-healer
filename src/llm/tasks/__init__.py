@@ -14,6 +14,10 @@ from src.llm.tasks import (
     dangling_e2o_relationship,
     duplicate_objects_on_ids,
     duplicate_objects_on_attributes,
+    missing_event,
+    missing_event_type,
+    missing_event_timestamp,
+    missing_object,
 )
 
 

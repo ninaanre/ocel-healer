@@ -91,6 +91,36 @@ class DuplicateResolutionOutput(TaskOutput):
     ids_to_delete: list[str] = Field(default_factory=list)
 
 
+class InferredTimestampOutput(TaskOutput):
+    """missing_event_timestamp.
+
+    `inferred_timestamp` is null when the model can't confidently interpolate
+    (no bracketing neighbors). It is a plain string matching the format of
+    the surrounding events' `ocel_time` values (typically
+    'YYYY-MM-DD HH:MM:SS').
+    """
+
+    inferred_timestamp: str | None = None
+
+
+class InferredObjectOutput(TaskOutput):
+    """missing_object.
+
+    A referenced object is absent from the `object` table (and from its
+    per-type sub-table). The model proposes both fields needed to insert
+    the missing row.
+
+    `ocel_type` is one of the closed candidate_types (or null when the
+    id/context is too opaque to classify).
+    `attributes` is a shallow dict of column-name → value for the per-type
+    sub-table's initial-state row (empty when the type has no attributes,
+    e.g. `customers`).
+    """
+
+    ocel_type: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
 __all__ = [
     "TaskOutput",
     "InferredTypeOutput",
@@ -99,4 +129,6 @@ __all__ = [
     "InferredReferentOutput",
     "CanonicalValueOutput",
     "DuplicateResolutionOutput",
+    "InferredTimestampOutput",
+    "InferredObjectOutput",
 ]
