@@ -116,26 +116,32 @@ def top_tabs(mo):
 def issue_summary(get_flags, mo, results, sqlite_path):
     _rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
     _cols = [
-        "Event", "Event Type", "Event Time", "Event Attribute", "Event Position",
+        "Event", "Event Type", "Event Time",
         "Object", "Object Type", "Object Attribute",
         "O2O Relations", "E2O Relations",
     ]
 
     _mapping = {
-        ("Missing Data",   "Object Attribute"): ["missing_attribute_value"],
-        ("Missing Data",   "Object Type"):      ["missing_object_type"],
-        ("Missing Data",   "O2O Relations"):    ["dangling_o2o_relationship"],
-        ("Missing Data",   "E2O Relations"):    ["dangling_e2o_relationship"],
-        ("Incorrect Data", "Object Attribute"): ["incorrect_attribute_datatype"],
-        ("Incorrect Data", "Object Type"):      ["incorrect_object_type"],
-        ("Incorrect Data", "Object"):           [
+        ("Missing Data",   "Event"):           ["missing_event"],
+        ("Missing Data",   "Event Type"):      ["missing_event_type"],
+        ("Missing Data",   "Event Time"):      ["missing_event_timestamp"],
+        ("Missing Data",   "Object"):          ["missing_object"],
+        ("Missing Data",   "Object Type"):     ["missing_object_type"],
+        ("Missing Data",   "Object Attribute"):["missing_attribute_value"],
+        ("Missing Data",   "O2O Relations"):   ["dangling_o2o_relationship"],
+        ("Missing Data",   "E2O Relations"):   ["dangling_e2o_relationship"],
+        ("Incorrect Data", "Object"):          [
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
+        ("Incorrect Data", "Object Type"):     ["incorrect_object_type"],
+        ("Incorrect Data", "Object Attribute"):["incorrect_attribute_datatype"],
     }
 
     _llm_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
 
-    _llm_detected_keys = {"incorrect_object_type"}
+    _llm_detected_keys = {
+        "incorrect_object_type",
+    }
     _llm_ever_run = any(k[0] == sqlite_path for k in get_flags())
 
     def _cell_state(row, col):
@@ -413,7 +419,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
         )
         return mo.vstack([heading, tab_group], gap=0)
 
-    # ── three sections ───────────────────────────────────────────────────────
+    # ── four sections ────────────────────────────────────────────────────────
 
     attr_section = _section("Attributes", [
         ("Missing values",   "missing_attribute_value",   results["missing_attribute_value"],   _bad_col("actual_value")),
@@ -424,6 +430,12 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
         ("Missing types",        "missing_object_type",              results["missing_object_type"],              _bad_col("ocel_type")),
         ("Duplicate IDs",        "duplicate_objects_on_ids",         results["duplicate_objects_on_ids"],         _bad_dup_id),
         ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
+    ])
+
+    evt_section = _section("Events", [
+        ("Missing events",       "missing_event",             results["missing_event"],             _bad_col("ocel_event_id")),
+        ("Missing types",        "missing_event_type",        results["missing_event_type"],        _bad_col("ocel_type")),
+        ("Missing timestamps",   "missing_event_timestamp",   results["missing_event_timestamp"],   _bad_col("actual_value")),
     ])
 
     rel_checks = [
@@ -444,7 +456,7 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
     rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
     rel_section = mo.vstack([rel_heading, rel_tabs], gap=0)
 
-    _auto_view = mo.vstack([obj_section, attr_section, rel_section], gap=0)
+    _auto_view = mo.vstack([obj_section, evt_section, attr_section, rel_section], gap=0)
     _auto_view if top_tab.value == "Detection" else None
     return
 

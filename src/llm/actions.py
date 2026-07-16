@@ -6,7 +6,11 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.detection.error_detection import _connect, _object_type_tables
+from src.detection.error_detection import (
+    _connect,
+    _event_type_tables,
+    _object_type_tables,
+)
 from src.llm.client import MIN_CONFIDENCE
 from src.llm.sql_utils import quote
 
@@ -19,6 +23,10 @@ class ActionResult:
 
     `kind` is one of:
       "update"   -- proposed concrete value; all fields populated.
+      "delete"   -- remove duplicate rows keeping MIN(rowid).
+      "insert"   -- create one or more new rows (see `inserts`); used by
+                    tasks like `missing_object` that must add both a row to
+                    `object` and a matching initial-state row to `object_<Type>`.
       "decline"  -- LLM said null; orchestrator attaches a routable target
                     (via task.suppressed_target) so override still works.
       "unrouted" -- no clean override target (e.g. duplicate_objects_on_ids).
@@ -30,6 +38,9 @@ class ActionResult:
     old_value: Any = None
     new_value: Any = None
     reason: str = ""
+    # Only populated when kind == "insert". Each entry:
+    #   {"table": str, "columns": dict[column_name, value]}
+    inserts: list[dict] = field(default_factory=list)
 
     @classmethod
     def update(cls, **fields: Any) -> "ActionResult":
@@ -39,6 +50,11 @@ class ActionResult:
     def delete(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
         """Delete duplicate rows keeping the one with MIN(rowid)."""
         return cls(kind="delete", target_table=target_table, target_pk=target_pk, reason=reason)
+
+    @classmethod
+    def insert(cls, *, inserts: list[dict], reason: str = "") -> "ActionResult":
+        """Insert one or more new rows. All inserts run in a single transaction."""
+        return cls(kind="insert", reason=reason, inserts=list(inserts))
 
     @classmethod
     def decline(cls, reason: str) -> "ActionResult":
@@ -90,6 +106,7 @@ def relation_swap_target(row: dict, *, table: str, sides: dict[str, dict]) -> di
 _PROPOSED_KEYS = (
     "coerced_value", "inferred_value", "inferred_type",
     "inferred_referent", "canonical_id", "canonical_value",
+    "inferred_timestamp", "ocel_type",
 )
 
 _EMPTY_TARGET = {"target_table": "", "target_pk": {}, "column": None, "old_value": None}
@@ -166,6 +183,19 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
             new_value=None, rationale=result.reason or rationale,
             confidence=confidence, issue_key=issue_key, proposed_value=None,
         )
+
+    if result.kind == "insert":
+        # target_table for display only; the real payload lives under "inserts".
+        display_table = result.inserts[0]["table"] if result.inserts else ""
+        action = _action(
+            "insert",
+            target={"target_table": display_table, "target_pk": {},
+                    "column": None, "old_value": None},
+            new_value=None, rationale=result.reason or rationale,
+            confidence=confidence, issue_key=issue_key, proposed_value=result.inserts,
+        )
+        action["inserts"] = result.inserts
+        return action
 
     if result.kind == "decline":
         return _action(
@@ -274,19 +304,30 @@ def _coerce_for_affinity(raw: Any, affinity: str) -> Any:
 _OVERRIDE_UNSET = object()
 
 
+def _allowed_tables(conn: sqlite3.Connection) -> set[str]:
+    """Whitelist: base OCEL2 tables + every per-type object_<Type> and event_<Type>."""
+    return (
+        {"object", "event", "object_object", "event_object"}
+        | {t for _, t in _object_type_tables(conn)}
+        | {t for _, t in _event_type_tables(conn)}
+    )
+
+
+def _resolve_table(conn: sqlite3.Connection, table: str) -> str:
+    """Return the schema-cased table name, tolerating case mismatches."""
+    allowed = _allowed_tables(conn)
+    if table in allowed:
+        return table
+    table_map = {t.lower(): t for t in allowed}
+    if table.lower() in table_map:
+        return table_map[table.lower()]
+    raise ValueError(f"Refusing to repair: unknown table {table!r}.")
+
+
 def _validate_target(conn: sqlite3.Connection, action: dict) -> tuple[str, str]:
     """Whitelist target_table, column and target_pk against the live schema.
     Returns (table, column); raises ValueError on any mismatch."""
-    allowed_tables = {"object", "event", "object_object", "event_object"} | {
-        t for _, t in _object_type_tables(conn)
-    }
-    table = action["target_table"]
-    if table not in allowed_tables:
-        # Try case-insensitive match (ocel_type vs ocel_type_map may differ in casing)
-        table_map = {t.lower(): t for t in allowed_tables}
-        if table.lower() not in table_map:
-            raise ValueError(f"Refusing to repair: unknown table {table!r}.")
-        table = table_map[table.lower()]
+    table = _resolve_table(conn, action["target_table"])
     cols = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
     col = action.get("column")
     if col is not None and col not in cols:
@@ -295,6 +336,31 @@ def _validate_target(conn: sqlite3.Connection, action: dict) -> tuple[str, str]:
     if bad_pk:
         raise ValueError(f"Refusing to repair: target_pk uses unknown column(s) {bad_pk!r}.")
     return table, col
+
+
+def _validate_insert(conn: sqlite3.Connection, entry: dict) -> tuple[str, dict[str, Any]]:
+    """Whitelist an insert entry against the live schema.
+
+    Returns (resolved_table, coerced_columns). Every column in `entry["columns"]`
+    must exist on the table; values are coerced through SQLite affinity so we
+    don't silently re-introduce a datatype violation via the fix path.
+    """
+    if not isinstance(entry, dict) or "table" not in entry or "columns" not in entry:
+        raise ValueError(f"Refusing to insert: malformed entry {entry!r}.")
+    if not isinstance(entry["columns"], dict) or not entry["columns"]:
+        raise ValueError(f"Refusing to insert: entry has no columns: {entry!r}.")
+    table = _resolve_table(conn, entry["table"])
+    schema_cols = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    unknown = set(entry["columns"]) - schema_cols
+    if unknown:
+        raise ValueError(
+            f"Refusing to insert: unknown column(s) {sorted(unknown)!r} in {table!r}."
+        )
+    coerced = {
+        col: _coerce_for_affinity(val, _column_affinity(conn, table, col))
+        for col, val in entry["columns"].items()
+    }
+    return table, coerced
 
 
 def apply_repair(
@@ -321,10 +387,42 @@ def apply_repair(
                 "Override cannot be applied: this noop has no routable target "
                 "(missing target_table, column, or target_pk)."
             )
+    elif action["kind"] == "insert":
+        if has_override:
+            raise ValueError("override not supported for insert actions")
     elif action["kind"] not in ("update", "delete"):
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
     with _connect(sqlite_path) as conn:
+        if action["kind"] == "insert":
+            entries = action.get("inserts") or []
+            if not entries:
+                raise ValueError("Refusing to apply insert: no rows to insert.")
+            planned: list[tuple[str, dict[str, Any], str, tuple]] = []
+            for entry in entries:
+                table, coerced = _validate_insert(conn, entry)
+                cols = list(coerced)
+                sql = (
+                    f'INSERT INTO {quote(table)} '
+                    f'({", ".join(quote(c) for c in cols)}) '
+                    f'VALUES ({", ".join("?" for _ in cols)})'
+                )
+                planned.append((table, coerced, sql, tuple(coerced[c] for c in cols)))
+
+            rendered = "\n--\n".join(
+                f"{sql}\n  with params = {params!r}" for _, _, sql, params in planned
+            )
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            n = 0
+            with conn:
+                for _, _, sql, params in planned:
+                    n += conn.execute(sql, params).rowcount
+            return (
+                f"Committed: {n} row(s) inserted across "
+                f"{len({t for t, *_ in planned})} table(s).\n{rendered}"
+            )
+
         table, col = _validate_target(conn, action)
 
         if action["kind"] == "delete":
