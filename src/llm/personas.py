@@ -147,11 +147,37 @@ DUPLICATE_EXPERT = textwrap.dedent(
 ).strip()
 
 
+TEMPORAL_EXPERT = textwrap.dedent(
+    """
+    <family_focus>
+      You are working on a TEMPORAL task — reasoning about when an event
+      occurred within a single object's (or a small set of objects')
+      lifecycle.
+        - Trust bracketing constraints from `neighbor_events`. If the
+          neighbors' process ordering fixes the anchor between two known
+          timestamps, return a value that sits within that window.
+        - Match the timestamp format of neighbors VERBATIM. If neighbors
+          use `'YYYY-MM-DD HH:MM:SS'`, do not switch to ISO-8601 with a
+          `T` separator or timezone suffix.
+        - The typical order-management lifecycle is: `place order` →
+          `confirm order` → `pay order` → `pick item` → `create package`
+          → `send package` → `package delivered`. Rare events
+          (`item out of stock`, `reorder item`, `failed delivery`) can
+          appear off the happy path; do not force them into the mainline
+          ordering unless neighbors support it.
+        - Return null only when neighbors give no bracketing signal at
+          all AND the anchor's activity gives no independent hint.
+    </family_focus>
+    """
+).strip()
+
+
 FAMILY_PERSONA: dict[str, str] = {
     "type": TYPE_EXPERT,
     "attribute": ATTRIBUTE_EXPERT,
     "relation": RELATION_EXPERT,
     "duplicate": DUPLICATE_EXPERT,
+    "temporal": TEMPORAL_EXPERT,
 }
 
 
