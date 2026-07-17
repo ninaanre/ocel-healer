@@ -10,10 +10,50 @@ This project investigates how data quality issues in OCELs can be detected and r
 
 - `src/` – implementation
     - `detection/` - detection of quality issues
-    - `repair/` - fix of quality issues
-    - `llm.py` - LLM integration (Ollama client + repair-suggestion logic)
+    - `exploration/` - exploration agent: profiles a log and produces repair hints
+    - `evaluation/` - measures repair quality with vs without exploration hints
+    - `llm/` - LLM integration (client, per-issue repair tasks)
     - `dashboard.py` - marimo dashboard
 - `data/` – object-centric event logs
+
+## Exploration agent
+
+Before repairing a log, the exploration agent analyses it and produces
+log-specific knowledge that repair agents receive as `exploration_hints`:
+a deterministic profile (schemas, null rates, id templates, value
+vocabularies, qualifier anomalies) plus an LLM-written interpretation guide.
+
+Run it either from the dashboard (pick a file and a model, press
+**🔎 Run exploration**) or from the CLI:
+
+```bash
+python -m src.exploration data/order-management-dirty.sqlite --model mistral-small3.2:latest
+```
+
+Artifacts land in `data/exploration/<db-stem>/` next to the data, where the
+repair tasks automatically pick them up:
+
+- `exploration_report.md` – human-readable summary (also shown in the dashboard)
+- `exploration_profile.json` – deterministic facts (source of truth for hints)
+- `exploration_guide.json` – LLM interpretations (optional layer)
+
+Repair works without them too: hints degrade gracefully when no exploration was run. 
+Use a non-reasoning model (e.g. `mistral-small3.2`, `llama3.1:8b`), 
+reasoning-heavy models (`qwen3.5`, `phi4-reasoning`, `gpt-oss`) exceed the per-section timeout.
+
+## Evaluating exploration hints
+
+```bash
+python -m src.evaluation.evaluate_hints --model mistral-small3.2:latest
+python -m src.evaluation.summarize_runs   # refresh data/evaluation/summary.md
+```
+
+Each run corrupts a copy of the clean log with known groundtruth, repairs
+every injected violation twice (with and without hints) and archives all
+artifacts under `data/evaluation/runs/<timestamp>-<model>/`. The cross-run
+summary lives in `data/evaluation/summary.md`.
+
+For now only for missing_attribute_values Issue
 
 ## Setup
 
