@@ -169,19 +169,22 @@ def detect_dangling_o2o_relationship(src: SqliteInput) -> pl.DataFrame:
 
     # Dedup: the object table can legitimately list the same id twice in this dataset.
     known = objects.unique(subset=["ocel_id"])
+    # `_exists` sentinels distinguish "object row absent" (dangling) from
+    # "object row present but ocel_type IS NULL" (missing_object_type).
+    known = known.with_columns(pl.lit(True).alias("_exists"))
 
     enriched = o2o.join(
-        known.rename({"ocel_id": "ocel_source_id", "ocel_type": "source_type"}),
+        known.rename({"ocel_id": "ocel_source_id", "ocel_type": "source_type", "_exists": "source_exists"}),
         on="ocel_source_id",
         how="left",
     ).join(
-        known.rename({"ocel_id": "ocel_target_id", "ocel_type": "target_type"}),
+        known.rename({"ocel_id": "ocel_target_id", "ocel_type": "target_type", "_exists": "target_exists"}),
         on="ocel_target_id",
         how="left",
     )
 
     violations = enriched.filter(
-        pl.col("source_type").is_null() | pl.col("target_type").is_null()
+        pl.col("source_exists").is_null() | pl.col("target_exists").is_null()
     )
 
     cols = [
@@ -190,9 +193,9 @@ def detect_dangling_o2o_relationship(src: SqliteInput) -> pl.DataFrame:
         "ocel_qualifier", "missing_side", "issue",
     ]
     return violations.with_columns(
-        pl.when(pl.col("source_type").is_null() & pl.col("target_type").is_null())
+        pl.when(pl.col("source_exists").is_null() & pl.col("target_exists").is_null())
         .then(pl.lit("both"))
-        .when(pl.col("source_type").is_null())
+        .when(pl.col("source_exists").is_null())
         .then(pl.lit("source"))
         .otherwise(pl.lit("target"))
         .alias("missing_side"),
@@ -443,6 +446,12 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
         events  = pl.read_database("SELECT ocel_id, ocel_type FROM event",  conn).unique(subset=["ocel_id"])
         objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn).unique(subset=["ocel_id"])
 
+    # `_exists` sentinels let us distinguish "row absent from parent table"
+    # (dangling) from "row present but ocel_type IS NULL" (a separate issue,
+    # covered by detect_missing_event_type / detect_missing_object_type).
+    events  = events.with_columns(pl.lit(True).alias("event_exists"))
+    objects = objects.with_columns(pl.lit(True).alias("object_exists"))
+
     enriched = (
         e2o
         .join(
@@ -458,7 +467,7 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
     )
 
     violations = enriched.filter(
-        pl.col("event_type").is_null() | pl.col("object_type").is_null()
+        pl.col("event_exists").is_null() | pl.col("object_exists").is_null()
     )
 
     cols = [
@@ -469,9 +478,9 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
     return (
         violations
         .with_columns(
-            pl.when(pl.col("event_type").is_null() & pl.col("object_type").is_null())
+            pl.when(pl.col("event_exists").is_null() & pl.col("object_exists").is_null())
             .then(pl.lit("both"))
-            .when(pl.col("event_type").is_null())
+            .when(pl.col("event_exists").is_null())
             .then(pl.lit("event"))
             .otherwise(pl.lit("object"))
             .alias("missing_side"),
