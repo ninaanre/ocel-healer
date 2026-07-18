@@ -42,6 +42,33 @@ def imports():
 
 
 @app.cell
+def issue_labels():
+    # Single source of truth for user-facing issue names. The wording follows
+    # the classification of Basmer et al., "Data Quality in Object-Centric
+    # Event Data: Issues Classification and Evaluation" (extending the
+    # 5th Intl. Workshop on Event Data and Behavioral Analytics, ICPM 2024) —
+    # see Table 3 in the paper. Keys are the canonical issue_key strings
+    # produced by src/detection/error_detection.py::detect_all and consumed
+    # by src/llm/tasks/*; values are the labels shown in the Issue Overview
+    # table, the rule-based section tabs, and the Resolution dropdown.
+    ISSUE_LABELS = {
+        "missing_event":                     "Missing Event",
+        "missing_event_type":                "Missing Event Type",
+        "missing_event_timestamp":           "Missing Event Time",
+        "missing_object":                    "Missing Object",
+        "missing_object_type":               "Missing Object Type",
+        "missing_attribute_value":           "Missing Object Attribute",
+        "dangling_o2o_relationship":         "Missing Object-to-Object",
+        "dangling_e2o_relationship":         "Missing Event-to-Object",
+        "duplicate_objects_on_ids":          "Incorrect Object (by ID)",
+        "duplicate_objects_on_attributes":   "Incorrect Object (by attributes)",
+        "incorrect_object_type":             "Incorrect Object Type",
+        "incorrect_attribute_datatype":      "Incorrect Object Attribute",
+    }
+    return (ISSUE_LABELS,)
+
+
+@app.cell
 def header(mo):
     mo.md("""
     # OCEL Error Detection & Resolution Dashboard
@@ -115,26 +142,44 @@ def top_tabs(mo):
 @app.cell
 def issue_summary(get_flags, mo, results, sqlite_path):
     _rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
-    _cols = [
-        "Event", "Event Type", "Event Time",
-        "Object", "Object Type", "Object Attribute",
-        "O2O Relations", "E2O Relations",
+
+    # Columns follow paper Table 3 (Basmer et al.): three OCED dimensions —
+    # Events, Objects, Relations — with the columns inside each group listed
+    # in paper order. We spell out the paper's "Event Attr." / "Object Attr."
+    # abbreviations for readability. `Event Attribute` and `Position` under
+    # Events are included even though no detector exists yet — they render
+    # as dashes, keeping the table shape aligned with the paper's Table 3.
+    _col_groups = [
+        ("Events",    ["Event", "Event Type", "Event Time", "Event Attribute", "Position"]),
+        ("Objects",   ["Object", "Object Type", "Object Attribute"]),
+        ("Relations", ["Object-to-Object", "Event-to-Object"]),
     ]
+    _cols = [c for _, cs in _col_groups for c in cs]
 
     _mapping = {
-        ("Missing Data",   "Event"):           ["missing_event"],
-        ("Missing Data",   "Event Type"):      ["missing_event_type"],
-        ("Missing Data",   "Event Time"):      ["missing_event_timestamp"],
-        ("Missing Data",   "Object"):          ["missing_object"],
-        ("Missing Data",   "Object Type"):     ["missing_object_type"],
-        ("Missing Data",   "Object Attribute"):["missing_attribute_value"],
-        ("Missing Data",   "O2O Relations"):   ["dangling_o2o_relationship"],
-        ("Missing Data",   "E2O Relations"):   ["dangling_e2o_relationship"],
-        ("Incorrect Data", "Object"):          [
+        # Events row  (paper codes in trailing comments)
+        ("Missing Data",   "Event"):            ["missing_event"],               # I2
+        ("Missing Data",   "Event Type"):       ["missing_event_type"],          # I6
+        ("Missing Data",   "Event Time"):       ["missing_event_timestamp"],     # I7
+        # ("Missing Data", "Event Attribute"):  I9  — no detector yet
+        # ("Missing Data", "Position"):         I5  — no detector yet
+
+        # Objects row
+        ("Missing Data",   "Object"):           ["missing_object"],              # N1
+        ("Missing Data",   "Object Type"):      ["missing_object_type"],         # N2
+        ("Missing Data",   "Object Attribute"): ["missing_attribute_value"],     # N3
+
+        # Relations row
+        ("Missing Data",   "Object-to-Object"): ["dangling_o2o_relationship"],   # N4
+        ("Missing Data",   "Event-to-Object"):  ["dangling_e2o_relationship"],   # N5
+
+        # Incorrect Data — N6 (paper §4.2) covers "erroneous duplicate" objects,
+        # which is why both duplicate detectors live in a single cell here.
+        ("Incorrect Data", "Object"):           [                                 # N6
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
-        ("Incorrect Data", "Object Type"):     ["incorrect_object_type"],
-        ("Incorrect Data", "Object Attribute"):["incorrect_attribute_datatype"],
+        ("Incorrect Data", "Object Type"):      ["incorrect_object_type"],       # N7
+        ("Incorrect Data", "Object Attribute"): ["incorrect_attribute_datatype"],# N8
     }
 
     _llm_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
@@ -168,10 +213,9 @@ def issue_summary(get_flags, mo, results, sqlite_path):
         "font-size:13px; border:1px solid #d0d7de; width:auto;"
     )
     _summary_th_style = (
-        "background:#f6f8fa; border:1px solid #d0d7de; padding:8px 4px; "
+        "background:#f6f8fa; border:1px solid #d0d7de; padding:8px 12px; "
         "font-weight:600; vertical-align:middle; text-align:center; "
-        "writing-mode:vertical-rl; transform:rotate(180deg); "
-        "height:120px; white-space:nowrap;"
+        "white-space:nowrap;"
     )
     _summary_corner_style = (
         "background:#f6f8fa; border:1px solid #d0d7de; padding:6px 10px;"
@@ -183,6 +227,13 @@ def issue_summary(get_flags, mo, results, sqlite_path):
     _summary_row_label_style = (
         "border:1px solid #d0d7de; padding:6px 10px; text-align:left; "
         "font-weight:600; background:#f6f8fa; white-space:nowrap;"
+    )
+    # Group-header row above the rotated column labels — spans Events (5),
+    # Objects (3), Relations (2). Matches paper Table 3's top row.
+    _summary_group_style = (
+        "background:#f6f8fa; border:1px solid #d0d7de; padding:6px 10px; "
+        "font-weight:700; text-align:center; text-transform:uppercase; "
+        "letter-spacing:0.04em; font-size:11px; color:#57606a;"
     )
 
     def _pill_html(n):
@@ -201,6 +252,13 @@ def issue_summary(get_flags, mo, results, sqlite_path):
         'background:#fff8c5;">?</span>'
     )
 
+    _group_cells = "".join(
+        f'<th colspan="{len(cs)}" style="{_summary_group_style}">{name}</th>'
+        for name, cs in _col_groups
+    )
+    _group_row = (
+        f'<tr><th style="{_summary_corner_style}"></th>{_group_cells}</tr>'
+    )
     _header_cells = "".join(f'<th style="{_summary_th_style}">{c}</th>' for c in _cols)
     _header_row = (
         f'<tr><th style="{_summary_corner_style}"></th>{_header_cells}</tr>'
@@ -226,7 +284,9 @@ def issue_summary(get_flags, mo, results, sqlite_path):
         '<div style="font-size:20px; font-weight:700; color:#1f2328; '
         'letter-spacing:-0.01em;">Issue Overview</div>'
         '<div style="margin-top:4px; color:#57606a; font-size:13px;">'
-        'Detected issues per issue type and OCEL dimension. '
+        'Data-quality issues per category and OCED dimension, following '
+        'the classification of Basmer et al. '
+        '(<em>Data Quality in Object-Centric Event Data</em>, ICPM 2024). '
         'A dash means no detector exists for that combination yet; '
         'a "?" means the detector is implemented but its LLM sweep has '
         'not been run yet for this file.</div>'
@@ -234,7 +294,7 @@ def issue_summary(get_flags, mo, results, sqlite_path):
     )
     _summary_table = mo.Html(
         f'<table style="{_summary_table_style}">'
-        f'<thead>{_header_row}</thead>'
+        f'<thead>{_group_row}{_header_row}</thead>'
         f'<tbody>{_body_html}</tbody></table>'
     )
     mo.vstack([_summary_header, _summary_table], gap=0)
@@ -300,7 +360,7 @@ def pagers(mo, results):
 
 
 @app.cell
-def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
+def sections(ISSUE_LABELS, PAGE_SIZE, mo, pager_buttons, results, top_tab):
 
     bad_style   = "background-color:#fde2e2; color:#b00020; font-weight:600;"
     table_style = (
@@ -401,11 +461,34 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
             f'font-size:12px; font-weight:600; color:{colour}; background:{bg};">{n}</span>'
         )
 
+    def _render_merged(subs):
+        """Render several (sublabel, key, df, is_bad) frames stacked under
+        small sub-headings inside a single tab. Used for the merged
+        Incorrect Object tab which combines the two duplicate detectors —
+        each keeps its own pager (via _render) so behaviour and highlights
+        stay identical to the single-detector case."""
+        parts = []
+        for sublabel, key, df, is_bad in subs:
+            head = mo.Html(
+                f'<div style="margin:8px 0 4px 0; font-size:13px; font-weight:600; '
+                f'color:#57606a;">{sublabel}&nbsp;{_badge(df.height)}</div>'
+            )
+            parts.extend([head, _render(key, df, is_bad)])
+        return mo.vstack(parts, gap=0.25)
+
     def _section(title, checks):
+        # Each check is either a single (label, key, df, is_bad) tuple or a
+        # merged (label, subs) tuple where subs is a list of the single form.
+        # Merged tabs render sub-frames stacked with mini sub-headings.
+        def _height(check):
+            if len(check) == 2:
+                return sum(df.height for _, _k, df, _ in check[1])
+            return check[2].height
+
         pills = "".join(
             f'<span style="color:{MUTED}; font-size:13px; margin-right:14px;">'
-            f'{label}&nbsp;{_badge(df.height)}</span>'
-            for label, _key, df, _ in checks
+            f'{check[0]}&nbsp;{_badge(_height(check))}</span>'
+            for check in checks
         )
         heading = mo.Html(
             f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; '
@@ -414,49 +497,46 @@ def sections(PAGE_SIZE, mo, pager_buttons, results, top_tab):
             f'<div style="margin-top:4px;">{pills}</div>'
             f'</div>'
         )
-        tab_group = mo.ui.tabs(
-            {label: _render(key, df, fn) for label, key, df, fn in checks}
-        )
+        tab_group = mo.ui.tabs({
+            check[0]: (
+                _render_merged(check[1]) if len(check) == 2
+                else _render(check[1], check[2], check[3])
+            )
+            for check in checks
+        })
         return mo.vstack([heading, tab_group], gap=0)
 
-    # ── four sections ────────────────────────────────────────────────────────
+    # ── three sections (paper Table 3 dimensions) ────────────────────────────
 
-    attr_section = _section("Attributes", [
-        ("Missing values",   "missing_attribute_value",   results["missing_attribute_value"],   _bad_col("actual_value")),
-        ("Incorrect datatypes",  "incorrect_attribute_datatype",  results["incorrect_attribute_datatype"],  _bad_col("actual_value")),
+    def _lbl(key):
+        return ISSUE_LABELS[key]
+
+    evt_section = _section("Events", [
+        (_lbl("missing_event"),           "missing_event",           results["missing_event"],           _bad_col("ocel_event_id")),
+        (_lbl("missing_event_type"),      "missing_event_type",      results["missing_event_type"],      _bad_col("ocel_type")),
+        (_lbl("missing_event_timestamp"), "missing_event_timestamp", results["missing_event_timestamp"], _bad_col("actual_value")),
     ])
 
     obj_section = _section("Objects", [
-        ("Missing types",        "missing_object_type",              results["missing_object_type"],              _bad_col("ocel_type")),
-        ("Duplicate IDs",        "duplicate_objects_on_ids",         results["duplicate_objects_on_ids"],         _bad_dup_id),
-        ("Duplicate attributes", "duplicate_objects_on_attributes",  results["duplicate_objects_on_attributes"],  _bad_dup_attrs),
+        (_lbl("missing_object"),                  "missing_object",                  results["missing_object"],                  _bad_col("ocel_object_id")),
+        (_lbl("missing_object_type"),             "missing_object_type",             results["missing_object_type"],             _bad_col("ocel_type")),
+        (_lbl("missing_attribute_value"),         "missing_attribute_value",         results["missing_attribute_value"],         _bad_col("actual_value")),
+        # Merged tab: paper N6 "Incorrect Object" covers both duplicate flavours
+        # (see paper §4.2). Users see one tab; two detector frames are stacked
+        # inside with mini sub-headings so each keeps its own highlighting rules.
+        ("Incorrect Object", [
+            (_lbl("duplicate_objects_on_ids"),        "duplicate_objects_on_ids",        results["duplicate_objects_on_ids"],        _bad_dup_id),
+            (_lbl("duplicate_objects_on_attributes"), "duplicate_objects_on_attributes", results["duplicate_objects_on_attributes"], _bad_dup_attrs),
+        ]),
+        (_lbl("incorrect_attribute_datatype"),    "incorrect_attribute_datatype",    results["incorrect_attribute_datatype"],    _bad_col("actual_value")),
     ])
 
-    evt_section = _section("Events", [
-        ("Missing events",       "missing_event",             results["missing_event"],             _bad_col("ocel_event_id")),
-        ("Missing types",        "missing_event_type",        results["missing_event_type"],        _bad_col("ocel_type")),
-        ("Missing timestamps",   "missing_event_timestamp",   results["missing_event_timestamp"],   _bad_col("actual_value")),
+    rel_section = _section("Relations", [
+        (_lbl("dangling_o2o_relationship"), "dangling_o2o_relationship", results["dangling_o2o_relationship"], _bad_o2o),
+        (_lbl("dangling_e2o_relationship"), "dangling_e2o_relationship", results["dangling_e2o_relationship"], _bad_e2o),
     ])
 
-    rel_checks = [
-        ("Object → Object", "dangling_o2o_relationship", results["dangling_o2o_relationship"], _bad_o2o),
-        ("Event → Object",  "dangling_e2o_relationship", results["dangling_e2o_relationship"], _bad_e2o),
-    ]
-    rel_pills = "".join(
-        f'<span style="color:{MUTED}; font-size:13px; margin-right:14px;">'
-        f'{label}&nbsp;{_badge(df.height)}</span>'
-        for label, _key, df, _ in rel_checks
-    )
-    rel_heading = mo.Html(
-        f'<div style="border-left:3px solid {ACCENT}; padding:6px 0 6px 12px; margin:12px 0 10px 0;">'
-        f'<span style="font-size:15px; font-weight:700; color:#1f2328;">Relationships</span>'
-        f'<div style="margin-top:4px;">{rel_pills}</div>'
-        f'</div>'
-    )
-    rel_tabs = mo.ui.tabs({label: _render(key, df, fn) for label, key, df, fn in rel_checks})
-    rel_section = mo.vstack([rel_heading, rel_tabs], gap=0)
-
-    _auto_view = mo.vstack([obj_section, evt_section, attr_section, rel_section], gap=0)
+    _auto_view = mo.vstack([evt_section, obj_section, rel_section], gap=0)
     _auto_view if top_tab.value == "Detection" else None
     return
 
@@ -790,10 +870,11 @@ def expert_resolution_llm_header(mo, top_tab):
 
 
 @app.cell
-def expert_pickers(get_flags, mo, results, sqlite_path, top_tab):
+def expert_pickers(ISSUE_LABELS, get_flags, mo, results, sqlite_path, top_tab):
     # In Resolution mode, expose every detector that has rows to act on,
     # PLUS `incorrect_object_type` if the user has confirmed any flags.
-    # Sorted alphabetically so the dropdown order is stable / predictable.
+    # Sorted alphabetically (by paper-style label, not raw issue_key) so
+    # the dropdown order is stable / predictable.
     available = sorted(
         k for k, df in results.items()
         if df.height > 0 and k != "incorrect_object_type"
@@ -801,14 +882,21 @@ def expert_pickers(get_flags, mo, results, sqlite_path, top_tab):
     n_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
     if n_confirmed > 0:
         available.append("incorrect_object_type")
-        available.sort()
+    # Build a {label: issue_key} mapping so users see human-readable names
+    # (matching the Issue Overview table and rule-based section tabs) while
+    # downstream cells still receive the canonical snake_case issue_key via
+    # `detector.value`. Falls back to the raw key for any unmapped issue.
+    options = {ISSUE_LABELS.get(k, k): k for k in available}
+    # Sort by the visible label for a stable, predictable ordering.
+    options = dict(sorted(options.items()))
     detector = mo.ui.dropdown(
-        options=available, value=(available[0] if available else None),
+        options=options,
+        value=(next(iter(options)) if options else None),
         label="Issue type",
     )
     if top_tab.value != "Resolution":
         _pickers_view = mo.md("")
-    elif not available:
+    elif not options:
         _pickers_view = mo.md(
             "_No violations to resolve. Run the deterministic "
             "detectors or the Detection tab first._"
