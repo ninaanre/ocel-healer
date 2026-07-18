@@ -58,7 +58,7 @@ class IssueTask(ABC):
     issue_key: ClassVar[str] = ""
 
     # Task-family key used to select a family persona (see personas.py).
-    # One of "type", "attribute", "relation", "duplicate".
+    # One of "type", "attribute", "relation", "duplicate", "temporal".
     family: ClassVar[str] = ""
 
     # Pydantic model the LLM's reply is validated against.

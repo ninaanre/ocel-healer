@@ -2,7 +2,7 @@
 
 Path constants, schema tweaks (PK removal), and a couple of low-level
 inject helpers (`_null_type_for`, `_clone_object_row`,
-`inject_n3a_missing_attribute`) that multiple issue modules build on.
+`inject_missing_attribute_value`) that multiple issue modules build on.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ def _default_dst_for_level(level: str) -> str:
 
 def _remove_object_primary_key(conn: sqlite3.Connection) -> None:
     """Recreate the object table without PRIMARY KEY so duplicate ocel_id rows
-    can be inserted (needed by every N6a flavor).  Idempotent: no-op if the PK
-    is already absent."""
+    can be inserted (needed by every duplicate_objects_on_ids flavor).
+    Idempotent: no-op if the PK is already absent."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='object'"
     ).fetchone()
@@ -79,7 +79,7 @@ def _clone_object_row(
     return clone_id
 
 
-def inject_n3a_missing_attribute(
+def inject_missing_attribute_value(
     conn: sqlite3.Connection,
     table: str,
     column: str,
@@ -88,7 +88,7 @@ def inject_n3a_missing_attribute(
     ocel_ids: list[str] | None = None,
     changed_field_col: str = "ocel_changed_field",
 ) -> list[str]:
-    """N3a: NULL `column` in `count` initial-state rows of `table`.
+    """Missing attribute value: NULL `column` in `count` initial-state rows of `table`.
 
     Skips change-delta rows (where ``ocel_changed_field IS NOT NULL``) so the
     resulting NULLs are genuine missing values.

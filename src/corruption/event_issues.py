@@ -22,8 +22,8 @@ import sqlite3
 # ---------------------------------------------------------------------------
 
 
-def inject_m1_null_place_order_easy(conn: sqlite3.Connection) -> str | None:
-    """M1 Easy: NULL the ocel_time on one `event_PlaceOrder` row.
+def inject_missing_event_timestamp_null_place_order_easy(conn: sqlite3.Connection) -> str | None:
+    """missing_event_timestamp Easy: NULL the ocel_time on one `event_PlaceOrder` row.
 
     Easy because `place order` is the first event in the lifecycle, so its
     neighbors are all upper bounds — the resolver has a clear "must be
@@ -36,8 +36,8 @@ def inject_m1_null_place_order_easy(conn: sqlite3.Connection) -> str | None:
     return row[0]
 
 
-def inject_m1_empty_pick_item_medium(conn: sqlite3.Connection) -> str | None:
-    """M1 Medium: Empty-string ocel_time on one `event_PickItem` row.
+def inject_missing_event_timestamp_empty_pick_item_medium(conn: sqlite3.Connection) -> str | None:
+    """missing_event_timestamp Medium: Empty-string ocel_time on one `event_PickItem` row.
 
     Medium because empty-string trips the detector but a naive `IS NULL`
     filter misses it, and `pick item` sits deep in the lifecycle with
@@ -50,8 +50,8 @@ def inject_m1_empty_pick_item_medium(conn: sqlite3.Connection) -> str | None:
     return row[0]
 
 
-def inject_m1_null_item_out_of_stock_hard(conn: sqlite3.Connection) -> str | None:
-    """M1 Hard: NULL the ocel_time on one `event_ItemOutOfStock` row.
+def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Connection) -> str | None:
+    """missing_event_timestamp Hard: NULL the ocel_time on one `event_ItemOutOfStock` row.
 
     Hard because `item out of stock` is a rare, off-happy-path event with
     sparse peer signal — bracketing must come from the item's own history
