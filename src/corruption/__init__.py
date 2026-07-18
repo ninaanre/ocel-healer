@@ -4,12 +4,19 @@ Each `inject_*` function introduces exactly one flavor of a known data-quality
 issue and returns the affected ocel_id(s) so callers can log or reference them.
 Injectors are grouped by OCEL dimension:
 
-    * `src/corruption/object_issues.py`   — object-side (N2/N3a/N6a/N6b/N7a,
-                                            incorrect_attribute_datatype).
-    * `src/corruption/event_issues.py`    — event-side missing_event,
+    * `src/corruption/object_issues.py`   — object-side: missing_object_type,
+                                            missing_attribute_value,
+                                            incorrect_object_type,
+                                            incorrect_attribute_datatype,
+                                            duplicate_objects_on_ids,
+                                            duplicate_objects_on_attributes.
+    * `src/corruption/event_issues.py`    — event-side: missing_event,
                                             missing_event_type,
                                             missing_event_timestamp.
-    * `src/corruption/relation_issues.py` — relation-borne (N10, O2O, M5).
+    * `src/corruption/relation_issues.py` — relation-borne:
+                                            dangling_e2o_relationship,
+                                            dangling_o2o_relationship,
+                                            missing_object.
 
 ``corrupt_database`` (in ``stages.py``, re-exported here) is the single entry
 point used by the dashboard, notebooks and tests. It copies the source SQLite
@@ -34,19 +41,6 @@ from src.corruption._common import (
     DEFAULT_CLEAN_PATH,
     DEFAULT_DIRTY_PATH,
     DEFAULT_FULL_PATH,
-    inject_n3a_missing_attribute,
-)
-
-# Legacy top-level injectors — historic notebooks import these directly.
-from src.corruption.object_issues import (
-    inject_n2,
-    inject_n6a,
-    inject_n6b,
-    inject_n7a_incorrect_object_type,
-)
-from src.corruption.relation_issues import (
-    inject_n10_event,
-    inject_n10_object,
 )
 from src.corruption.stages import corrupt_database
 
@@ -56,12 +50,4 @@ __all__ = [
     "DEFAULT_CLEAN_PATH",
     "DEFAULT_DIRTY_PATH",
     "DEFAULT_FULL_PATH",
-    # Legacy injector shims for notebooks
-    "inject_n2",
-    "inject_n3a_missing_attribute",
-    "inject_n6a",
-    "inject_n6b",
-    "inject_n7a_incorrect_object_type",
-    "inject_n10_event",
-    "inject_n10_object",
 ]

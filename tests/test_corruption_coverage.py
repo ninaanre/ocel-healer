@@ -5,7 +5,7 @@ row per detector on top of the clean-DB baseline.  Values are asserted as
 ``>=`` because injecting a NULL object type causes a cascade in the two
 dangling-relationship detectors (every relationship referencing the retyped
 object also becomes dangling), and that cascade grows/shrinks with the
-dataset. The M5 (`missing_object`) injectors also add rows that trip
+dataset. The `missing_object` injectors also add rows that trip
 ``dangling_e2o_relationship`` — this is intentional: the same violation
 surfaces in both detectors and the dashboard routes it to the appropriate
 grid cell. The new ``missing_event`` injectors are analogous: they trip
@@ -56,10 +56,10 @@ CLEAN_BASELINE = {
 # Snapshot of the counts produced by the pre-tier `corrupt_database` body,
 # captured after regenerating the dirty DB fresh.  If this changes, the
 # legacy path has drifted and existing demos may need re-recording. The
-# `missing_event=1` entry comes from the legacy `inject_n10_event` injector,
-# which inserts an E2O row referencing a fake event id — the new
-# `detect_missing_event` picks that up as well as the existing
-# `dangling_e2o_relationship` detector.
+# `missing_event=1` entry comes from the legacy
+# `inject_dangling_e2o_relationship_event` injector, which inserts an E2O
+# row referencing a fake event id — the new `detect_missing_event` picks
+# that up as well as the existing `dangling_e2o_relationship` detector.
 LEGACY_SNAPSHOT = {
     "missing_object_type":              1,
     "missing_attribute_value":          0,
@@ -119,9 +119,9 @@ def test_tier_triggers_each_detector(dirty_paths, level, detector):
 def test_all_level_triggers_each_detector(dirty_paths, detector):
     """`level='all'` produces at least 3 rows per detector above baseline."""
     counts = _counts(dirty_paths["all"])
-    # duplicate_objects_on_ids from `dup_id_triple_null_type` counts as a single
-    # group of size 3, so the detector row-count contribution is 1 (one group),
-    # not 3 — total >= 3 groups (one per flavor).
+    # duplicate_objects_on_ids from `duplicate_objects_on_ids_triple_null_type`
+    # counts as a single group of size 3, so the detector row-count
+    # contribution is 1 (one group), not 3 — total >= 3 groups (one per flavor).
     expected_new = 3
     assert counts[detector] >= CLEAN_BASELINE[detector] + expected_new, (
         f"detector={detector}: got {counts[detector]}, "
