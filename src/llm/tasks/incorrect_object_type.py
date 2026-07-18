@@ -8,7 +8,7 @@ class IncorrectObjectType(DetectionTask):
     OutputModel = InferredTypeOutput
 
     TASK = """
-        An object row has a non-empty `ocel_type`, but that type may be wrong.
+        An object row has a non-empty `ocel_type`, but that type may be incorrect.
         Decide whether the current type is consistent with the object's id,
         the events touching it, and its attribute row. Flag a mismatch only
         when the evidence points to a different type; otherwise return null.

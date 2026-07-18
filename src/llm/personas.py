@@ -3,8 +3,8 @@
 Two layers:
   - BASE_PERSONA   — voice + universal rules; applies to every task.
   - FAMILY_PERSONA — one paragraph per task family (type, attribute,
-                     relation, duplicate) appended after the base to
-                     sharpen focus without full one-persona-per-task
+                     relation, duplicate, temporal) appended after the
+                     base to sharpen focus without full one-persona-per-task
                      duplication.
 
 `resolution._build_messages` composes the system message as:
