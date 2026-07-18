@@ -28,7 +28,7 @@ class DanglingO2ORelationship(ResolutionTask):
                                     the type of the missing end, e.g.
                                     `belongs_to`, `part_of`, `parent`)
         - object                    the known end's id, type, attributes
-        - candidate_objects         up to 50 {ocel_id, ocel_type} drawn
+        - candidate_objects         up to 200 {ocel_id, ocel_type} drawn
                                     from the `object` table
     """
 

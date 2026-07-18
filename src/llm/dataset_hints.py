@@ -12,14 +12,18 @@ threaded into the task context via `build_context(..., hints=hints)`.
 
 Resolution order for `DatasetHints.load(sqlite_path)`:
   1. `<sqlite_path stem>.hints.yaml` next to the .sqlite file
-  2. `data/dataset_hints.yaml` (relative to cwd)
-  3. `$OCEL_DATASET_HINTS` env var (path to a yaml file)
-  4. Empty hints (the dataset-agnostic default)
+  2. `<sqlite_path stem with -easy|-medium|-hard|-all|-full|-clean stripped>.hints.yaml`
+     — so tiered corruption outputs (e.g. `order-management-easy.sqlite`)
+     inherit `order-management.hints.yaml`
+  3. `data/dataset_hints.yaml` (relative to cwd)
+  4. `$OCEL_DATASET_HINTS` env var (path to a yaml file)
+  5. Empty hints (the dataset-agnostic default)
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -117,11 +121,24 @@ class DatasetHints:
         )
 
 
+# Suffixes appended to a log stem by tiered corruption / cleaning
+# (`corrupt_database(level=…)` writes `-easy`, `-medium`, `-hard`, `-full`;
+# a clean copy is often kept as `-clean`). Stripping one of these lets a
+# tiered file inherit the base log's hints yaml.
+_TIER_SUFFIX_RE = re.compile(r"-(easy|medium|hard|all|full|clean)$")
+
+
 def _candidate_paths(sqlite_path: str | os.PathLike[str] | None) -> list[Path | None]:
     candidates: list[Path | None] = []
     if sqlite_path:
         p = Path(sqlite_path)
         candidates.append(p.with_suffix(".hints.yaml"))
+        # Fall back to the base log's hints when running against a tiered
+        # corruption output: `order-management-easy.sqlite` →
+        # `order-management.hints.yaml`.
+        base_stem = _TIER_SUFFIX_RE.sub("", p.stem)
+        if base_stem != p.stem:
+            candidates.append(p.with_name(f"{base_stem}.hints.yaml"))
     candidates.append(Path("data") / "dataset_hints.yaml")
     env = os.getenv("OCEL_DATASET_HINTS")
     if env:

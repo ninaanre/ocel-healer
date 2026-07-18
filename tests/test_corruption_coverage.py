@@ -60,6 +60,15 @@ CLEAN_BASELINE = {
 # `inject_dangling_e2o_relationship_event` injector, which inserts an E2O
 # row referencing a fake event id — the new `detect_missing_event` picks
 # that up as well as the existing `dangling_e2o_relationship` detector.
+#
+# `dangling_e2o_relationship=2` reflects only the two rows the two legacy
+# injectors add (one missing_object side, one missing_event side). Earlier
+# snapshots of this test recorded much larger numbers (o2o=230, e2o=489)
+# because the detectors filtered on `event_type IS NULL / object_type IS
+# NULL`, which also flagged every relation touching the single object
+# that `inject_missing_object_type` NULL-types. That was a false-positive
+# double-count (the null-type object is already reported by
+# missing_object_type); the detectors now use existence sentinels.
 LEGACY_SNAPSHOT = {
     "missing_object_type":              1,
     "missing_attribute_value":          0,
@@ -70,8 +79,8 @@ LEGACY_SNAPSHOT = {
     "duplicate_objects_on_ids":         1,
     "duplicate_objects_on_attributes":  385,
     "incorrect_attribute_datatype":     0,
-    "dangling_o2o_relationship":        230,
-    "dangling_e2o_relationship":        489,
+    "dangling_o2o_relationship":        0,
+    "dangling_e2o_relationship":        2,
 }
 
 

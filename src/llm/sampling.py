@@ -86,9 +86,13 @@ def sample_peers(
     order = _hash_order_sql(_seed_from(anchor_id, seed))
 
     if target_col and target_col in all_cols:
-        # Stratified: half with target_col non-null, half unrestricted.
+        # Stratified: at least half the peers should have `target_col`
+        # non-null so the LLM sees valid examples. The fill query
+        # recomputes its LIMIT from the actual stratified rowcount — a
+        # static `rest = k - half` would leave the total peer count
+        # below `k` whenever fewer than `half` rows satisfy the strat
+        # predicate.
         half = max(1, k // 2)
-        rest = k - half
 
         strat_sql = (
             f'SELECT {quoted_cols} FROM {quote(table)} '
@@ -101,14 +105,18 @@ def sample_peers(
         seen_ids.add(anchor_id)
 
         # Fill remainder with any peers not already included.
-        placeholders = ",".join("?" * len(seen_ids))
-        fill_sql = (
-            f'SELECT {quoted_cols} FROM {quote(table)} '
-            f'WHERE {base_where} AND ocel_id NOT IN ({placeholders}) '
-            f'ORDER BY {order} LIMIT ?'
-        )
-        fill_params = (*params, *seen_ids, rest)
-        fill_rows = conn.execute(fill_sql, fill_params).fetchall()
+        fill_limit = max(0, k - len(strat_rows))
+        if fill_limit:
+            placeholders = ",".join("?" * len(seen_ids))
+            fill_sql = (
+                f'SELECT {quoted_cols} FROM {quote(table)} '
+                f'WHERE {base_where} AND ocel_id NOT IN ({placeholders}) '
+                f'ORDER BY {order} LIMIT ?'
+            )
+            fill_params = (*params, *seen_ids, fill_limit)
+            fill_rows = conn.execute(fill_sql, fill_params).fetchall()
+        else:
+            fill_rows = []
 
         rows = list(strat_rows) + list(fill_rows)
     else:
@@ -130,13 +138,17 @@ def sample_candidates(
     seed: int = 0,
     expected_type: str | None = None,
     kind: str = "object",
+    k_fallback: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return up to `k` candidate {ocel_id, ocel_type} rows.
 
     `kind='object'` samples from `object`; `kind='event'` from `event`.
     When `expected_type` matches a known ocel_type stem (case-insensitive),
-    the sample is pre-filtered to that type. Otherwise the sample mixes
-    deterministic-random rows with rows sharing an id-prefix with `anchor_id`.
+    the sample is pre-filtered to that type and capped at `k`. Otherwise the
+    sample mixes deterministic-random rows with rows sharing an id-prefix
+    with `anchor_id`, and is capped at `k_fallback` (defaulting to
+    ``max(k, 200)``) — an untargeted pool needs more headroom or the true
+    referent is likely to be invisible to the LLM.
     """
     if kind not in ("object", "event"):
         raise ValueError(f"kind must be 'object' or 'event', got {kind!r}")
@@ -157,24 +169,33 @@ def sample_candidates(
         return [{"ocel_id": r[0], "ocel_type": r[1]} for r in rows]
 
     # Two-strand fallback: half random, half sharing an id prefix. Query
-    # `k` from each strand (not `half`/`rest`) so overlap between the two
-    # strands doesn't drop the returned count below k.
+    # `k_eff` from each strand (not `half`/`rest`) so overlap between the two
+    # strands doesn't drop the returned count below k_eff.
+    k_eff = k_fallback if k_fallback is not None else max(k, 200)
     rand_sql = f'SELECT ocel_id, ocel_type FROM {table} ORDER BY {order} LIMIT ?'
-    rand_rows = conn.execute(rand_sql, (k,)).fetchall()
+    rand_rows = conn.execute(rand_sql, (k_eff,)).fetchall()
 
     prefix_rows: list[tuple[Any, Any]] = []
     if anchor_id:
         prefix = _id_prefix(str(anchor_id))
         if prefix:
+            # Escape SQL LIKE metacharacters so ids containing `_` or `%`
+            # (e.g. `out_of_stock_i-…` collapsing to prefix `out_`) don't
+            # broaden the match — `_` is LIKE's single-char wildcard.
+            escaped = (
+                prefix.replace("\\", "\\\\")
+                      .replace("%", "\\%")
+                      .replace("_", "\\_")
+            )
             prefix_sql = (
                 f'SELECT ocel_id, ocel_type FROM {table} '
-                f'WHERE ocel_id LIKE ? AND ocel_id != ? '
+                f'WHERE ocel_id LIKE ? ESCAPE \'\\\' AND ocel_id != ? '
                 f'ORDER BY {order} LIMIT ?'
             )
-            prefix_rows = conn.execute(prefix_sql, (f"{prefix}%", anchor_id, k)).fetchall()
+            prefix_rows = conn.execute(prefix_sql, (f"{escaped}%", anchor_id, k_eff)).fetchall()
 
     # Interleave prefix-first (they're the higher-signal picks) then random,
-    # deduping and stopping at k.
+    # deduping and stopping at k_eff.
     combined: list[tuple[Any, Any]] = []
     seen: set[Any] = set()
     for r in (*prefix_rows, *rand_rows):
@@ -182,7 +203,7 @@ def sample_candidates(
             continue
         seen.add(r[0])
         combined.append(r)
-        if len(combined) >= k:
+        if len(combined) >= k_eff:
             break
 
     return [{"ocel_id": r[0], "ocel_type": r[1]} for r in combined]

@@ -140,7 +140,7 @@ def top_tabs(mo):
 
 
 @app.cell
-def issue_summary(get_flags, mo, results, sqlite_path):
+def issue_summary(get_flags, get_sweep_ran, mo, results, sqlite_path):
     _rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
 
     # Columns follow paper Table 3 (Basmer et al.): three OCED dimensions —
@@ -187,7 +187,14 @@ def issue_summary(get_flags, mo, results, sqlite_path):
     _llm_detected_keys = {
         "incorrect_object_type",
     }
-    _llm_ever_run = any(k[0] == sqlite_path for k in get_flags())
+    # True when the LLM sweep has been run for any LLM-detected issue on
+    # this file, regardless of whether it flagged anything. Distinct from
+    # "did the sweep produce confirmed flags" — an empty-result sweep still
+    # counts as "ever run".
+    _sweep_ran = get_sweep_ran()
+    _llm_ever_run = any(
+        (sqlite_path, key) in _sweep_ran for key in _llm_detected_keys
+    )
 
     def _cell_state(row, col):
         """Return ('none', None), ('pending', None), or ('count', int)."""
@@ -544,7 +551,12 @@ def sections(ISSUE_LABELS, PAGE_SIZE, mo, pager_buttons, results, top_tab):
 @app.cell
 def expert_state(mo):
     get_flags, set_flags = mo.state({})
-    return get_flags, set_flags
+    # Tracks (sqlite_path, issue_key) pairs for which the LLM sweep has been
+    # run at least once — even when it flagged zero rows. Distinct from
+    # `get_flags` (which only holds confirmed flags), so the Issue Overview
+    # can tell "sweep hasn't run" apart from "sweep ran and found nothing".
+    get_sweep_ran, set_sweep_ran = mo.state(set())
+    return get_flags, get_sweep_ran, set_flags, set_sweep_ran
 
 
 @app.cell
@@ -575,6 +587,25 @@ def expert_helpers(mo):
                 f"<div><b>Rationale:</b> {action['rationale']}</div>"
                 f"{confidence_bar}</div>"
             )
+        if action["kind"] == "insert":
+            inserts = action.get("inserts") or []
+            rows_html = []
+            for ins in inserts:
+                cols = ins.get("columns") or {}
+                cells = " &nbsp; ".join(
+                    f"<b>{k}</b>=<code>{v!r}</code>" for k, v in cols.items()
+                )
+                rows_html.append(
+                    f"<div style='margin:4px 0'>→ <code>{ins.get('table', '')}</code>: {cells}</div>"
+                )
+            body = "".join(rows_html) or "<div><i>(no rows)</i></div>"
+            return mo.Html(
+                f"<div style='font-family:system-ui'>"
+                f"<div><b>Kind:</b> insert &nbsp; <b>Rows:</b> {len(inserts)}</div>"
+                f"<div style='margin:6px 0'>{body}</div>"
+                f"<div><b>Rationale:</b> {action['rationale']}</div>"
+                f"{confidence_bar}</div>"
+            )
         return mo.Html(
             f"<div style='font-family:system-ui'>"
             f"<div><b>Kind:</b> {action['kind']} &nbsp; <b>Table:</b> {action['target_table']} "
@@ -586,6 +617,9 @@ def expert_helpers(mo):
         )
 
     def is_routable(action):
+        # Inserts route via the "inserts" payload rather than a target row.
+        if action.get("kind") == "insert":
+            return bool(action.get("inserts"))
         return (
             action.get("target_table")
             and action.get("column")
@@ -653,7 +687,9 @@ def expert_detection_sweep(
     connect_sqlite,
     detect_all_with_llm,
     detect_btn,
+    get_sweep_ran,
     mo,
+    set_sweep_ran,
     sqlite_path,
     top_tab,
     type_picker,
@@ -715,6 +751,14 @@ def expert_detection_sweep(
                 f"Judged **{len(verdicts)}** `{chosen_type}` object(s) → "
                 f"**{len(proposals)}** proposed flag(s)."
             ).callout(kind="info" if proposals else "success")
+            # Mark this (sqlite_path, issue_key) as swept so the Issue
+            # Overview can drop the pending "?" badge even when the sweep
+            # flagged nothing.
+            _marker = (sqlite_path, "incorrect_object_type")
+            _ran = set(get_sweep_ran())
+            if _marker not in _ran:
+                _ran.add(_marker)
+                set_sweep_ran(_ran)
     return proposals, sweep_summary
 
 
