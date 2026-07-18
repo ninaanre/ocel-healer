@@ -133,13 +133,17 @@ def neighbor_events_ctx(
     with_time.sort(key=lambda e: _ts_key(e["ocel_time"]))
 
     # Balanced slice around the anchor's own timestamp when we can find it.
+    # Empty-string timestamps count as missing — the medium
+    # missing_event_timestamp injector sets ocel_time = '' and we do not want
+    # to treat that as a valid anchor (all real timestamps compare > '',
+    # which collapses the balanced slice to an all-following slice).
     anchor_time = None
     for etype, table in type_map.items():
         got = conn.execute(
             f'SELECT ocel_time FROM "{table}" WHERE ocel_id = ? LIMIT 1',
             (event_id,),
         ).fetchone()
-        if got and got[0] is not None:
+        if got and got[0]:  # truthy check rejects both None and ''
             anchor_time = got[0]
             break
 
@@ -148,7 +152,10 @@ def neighbor_events_ctx(
             preceding = [e for e in with_time if e["ocel_time"] and str(e["ocel_time"]) <= str(anchor_time)]
             following = [e for e in with_time if e["ocel_time"] and str(e["ocel_time"]) > str(anchor_time)]
             half = max_neighbors // 2
-            slice_ = preceding[-half:] + following[:max_neighbors - half]
+            # `preceding[-0:]` would return the whole list (Python's -0 == 0
+            # slice quirk), so guard the half=0 case explicitly.
+            head = preceding[-half:] if half else []
+            slice_ = head + following[:max_neighbors - half]
             # Top up if one side was short.
             if len(slice_) < max_neighbors:
                 extras = [e for e in with_time if e not in slice_][: max_neighbors - len(slice_)]

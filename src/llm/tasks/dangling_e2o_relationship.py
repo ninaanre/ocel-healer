@@ -32,8 +32,9 @@ class DanglingE2ORelationship(ResolutionTask):
                                        object (context only)
         - candidate_objects            up to 50 {ocel_id, ocel_type} — set
                                        when missing_side='object', pre-filtered
-                                       by qualifier when possible
-        - candidate_events             up to 50 {ocel_id, ocel_type} — set
+                                       by qualifier when possible (up to 200
+                                       when the qualifier gives no type hint)
+        - candidate_events             up to 200 {ocel_id, ocel_type} — set
                                        when missing_side='event'
     """
 

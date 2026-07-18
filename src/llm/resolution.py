@@ -45,7 +45,20 @@ def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
     try:
         payload = _call_task_or_legacy(task, ctx)
     except LLMOutputInvalid as e:
-        return actions.malformed_output_noop(task, row, str(e))
+        # Give the task a chance to fire a deterministic branch (e.g.
+        # DuplicateObjectsOnIds pure same-type case) that consumes only
+        # the detector row. from_task_result is confidence-gated, so we
+        # inject a max-confidence stub payload plus the LLM error on the
+        # rationale — the deterministic branch inside parse_payload
+        # ignores the payload contents anyway. If parse_payload has no
+        # deterministic branch it returns decline/unrouted (rendered as
+        # a noop with the LLM error surfaced).
+        try:
+            stub = {"confidence": 1.0,
+                    "rationale": f"LLM output invalid: {e}"}
+            return actions.from_task_result(task, row, stub)
+        except Exception:  # noqa: BLE001 -- parse_payload itself failed
+            return actions.malformed_output_noop(task, row, str(e))
     return actions.from_task_result(task, row, payload)
 
 

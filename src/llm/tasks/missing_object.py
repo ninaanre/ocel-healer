@@ -6,7 +6,6 @@ from src.detection.error_detection import (
 from src.llm.actions import ActionResult
 from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import InferredObjectOutput
-from src.llm.sql_utils import table_for_type
 from src.llm.tasks._base import ResolutionTask
 
 
@@ -95,11 +94,14 @@ class MissingObject(ResolutionTask):
            "confidence": 0.4}
     """
 
-    # Key used to smuggle the resolved per-type sub-table from build_context
-    # (which has a live conn) to parse_payload (which doesn't). Stashed on
-    # the `row` dict; the leading underscore signals internal-use-only so
-    # the LLM prompt renderer ignores it.
+    # Keys used to smuggle build_context resolutions into parse_payload
+    # (which has no live conn). Stashed on the `row` dict; the leading
+    # underscore signals internal-use-only so the LLM prompt renderer ignores
+    # them. `_TYPE_MAP_KEY` holds a {ocel_type: sub_table} dict so
+    # parse_payload can route the insert by the LLM's *chosen* type, not by
+    # the prefix guess (the prompt explicitly invites overrides).
     _TABLE_HINT_KEY = "_resolved_target_table"
+    _TYPE_MAP_KEY = "_object_type_table_map"
 
     def anchor(self, row: dict) -> tuple[str | None, str | None]:
         return (
@@ -110,12 +112,18 @@ class MissingObject(ResolutionTask):
     def build_context(self, conn, row, *, hints=None):
         hints = hints or DatasetHints.empty()
         ctx: dict = {"issue_key": self.issue_key, "violation": dict(row)}
-        ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
+        type_table_pairs = _object_type_tables(conn)
+        ctx["candidate_types"] = [t for t, _ in type_table_pairs]
 
-        # Resolve the per-type sub-table now and stash on the row so
-        # parse_payload can build the insert plan without a fresh conn.
+        # Full type→table map: parse_payload routes by the LLM's chosen type.
+        type_map = {t: table for t, table in type_table_pairs}
+        row[self._TYPE_MAP_KEY] = type_map
+
+        # Prefix-guessed sub-table drives peer_columns (matches the prompt
+        # example the LLM sees). If the LLM overrides ocel_type, parse_payload
+        # re-routes via `_TYPE_MAP_KEY`.
         _, anchor_type = self.anchor(row)
-        target_table = table_for_type(conn, anchor_type)
+        target_table = type_map.get(anchor_type) if anchor_type else None
         row[self._TABLE_HINT_KEY] = target_table
         if target_table:
             ctx["peer_columns"] = [c for c, _ in _column_info(conn, target_table)]
@@ -147,6 +155,13 @@ class MissingObject(ResolutionTask):
             )
 
         target_table = row.get(self._TABLE_HINT_KEY)
+        # Route by the LLM's chosen type (the prompt permits overriding the
+        # prefix guess). Fall back to the prefix-derived table only if the
+        # type map lookup fails.
+        type_map = row.get(self._TYPE_MAP_KEY) or {}
+        chosen_table = type_map.get(ocel_type)
+        if chosen_table:
+            target_table = chosen_table
         if not target_table:
             return ActionResult.unrouted(
                 f"Cannot resolve per-type sub-table for ocel_type={ocel_type!r}",
