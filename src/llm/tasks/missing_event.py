@@ -1,6 +1,5 @@
 from src.detection.error_detection import _event_type_tables
 from src.llm.actions import ActionResult
-from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import InferredObjectOutput
 from src.llm.tasks._base import ResolutionTask
 
@@ -113,8 +112,7 @@ class MissingEvent(ResolutionTask):
         # No object-side anchor; we build custom context below.
         return (None, None)
 
-    def build_context(self, conn, row, *, hints=None):
-        hints = hints or DatasetHints.empty()
+    def build_context(self, conn, row, *, use_hints=True):
         ctx: dict = {"issue_key": self.issue_key, "violation": dict(row)}
         type_map = dict(_event_type_tables(conn))
         ctx["candidate_types"] = list(type_map.keys())
@@ -161,9 +159,9 @@ class MissingEvent(ResolutionTask):
             if enriched:
                 ctx["object_events"] = enriched
 
-        if hints.data_semantics:
-            ctx["data_semantics"] = hints.data_semantics
-        self._call_extend_context(conn, ctx, row, hints)
+        if use_hints:
+            self._attach_exploration_hints(conn, ctx, row)
+        self.extend_context(conn, ctx, row)
         return ctx
 
     def parse_payload(self, row: dict, payload: dict) -> ActionResult:

@@ -1,3 +1,4 @@
+from src.exploration.hint_selector import all_type_summaries
 from src.llm.actions import ActionResult
 from src.llm.schemas import InferredTypeOutput
 from src.llm.tasks._base import ResolutionTask
@@ -7,6 +8,11 @@ class MissingObjectType(ResolutionTask):
     issue_key = "missing_object_type"
     family = "type"
     OutputModel = InferredTypeOutput
+
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
+        # The row has no usable object_type — the task needs the overview of
+        # ALL types (what they represent + their id templates) to pick one.
+        return {"all_object_types": all_type_summaries(profile, guide)}
 
     TASK = """
         An object row in the `object` table has a NULL or empty `ocel_type`.
@@ -27,6 +33,9 @@ class MissingObjectType(ResolutionTask):
         1. Read `violation.ocel_id` first — id keywords or human names are
            often the single strongest signal (e.g. "Alessandro Berti" → a
            person, `p-123456` → a package, `i-88001` → an item).
+           If `exploration_hints.all_object_types` is present, match the id
+           against each type's `id_template` (digit runs shown as `#`): a
+           matching template is strong evidence for that type.
         2. Read the qualifiers in `events`. The qualifier names the ROLE
            the object plays, not the event's subject. Qualifiers like
            `shipper`, `handler`, `picker` mean this object IS the

@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 
-MODEL = os.getenv("OCEL_LLM_MODEL", "qwen2.5:7b")
+MODEL = os.getenv("OCEL_LLM_MODEL", "qwen3:8b")
 LLM_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 MIN_CONFIDENCE = float(os.getenv("OCEL_LLM_MIN_CONFIDENCE", "0.4"))
 
@@ -44,10 +44,18 @@ def llm_ready() -> tuple[bool, list[str]]:
     return True, [m.get("name", "") for m in data.get("models", []) if m.get("name")]
 
 
-def _post_chat(messages: list[dict[str, str]]) -> str:
-    """Send one chat-completions request; return the raw assistant text."""
+def _post_chat(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    timeout: float = 60.0,
+) -> str:
+    """Send one chat-completions request; return the raw assistant text.
+
+    Defaults preserve the repair-agent behaviour (active model, 60s timeout).
+    The exploration agent passes its own model/timeout."""
     body = json.dumps({
-        "model": _active_model,
+        "model": model or _active_model,
         "messages": messages,
         "response_format": {"type": "json_object"},
         "temperature": 0.0,
@@ -59,7 +67,7 @@ def _post_chat(messages: list[dict[str, str]]) -> str:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60.0) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     return payload["choices"][0]["message"]["content"].strip()
 
@@ -127,12 +135,25 @@ def call_task(
     raise LLMOutputInvalid(raw_replies, error)
 
 
-# Backwards-compatible: some older call sites (if any remain) call
-# `call_llm(user_prompt)`. Kept as a thin wrapper that skips validation.
-def call_llm(user_prompt: str, system_prompt: str = "") -> dict[str, Any]:
-    """Legacy: one JSON-mode call without validation. Prefer `call_task`."""
-    raw = _post_chat([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ])
+def call_llm(
+    user_prompt: str,
+    system_prompt: str = "",
+    *,
+    model: str | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """One JSON-mode call without schema validation. Returns the parsed dict.
+
+    The repair path prefers `call_task` (validated + retry); this entry point
+    serves the exploration agent, which passes its own system_prompt, model
+    and a longer timeout for the big guide-building prompts.
+    """
+    raw = _post_chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        model=model,
+        timeout=timeout,
+    )
     return json.loads(_strip_fences(raw))

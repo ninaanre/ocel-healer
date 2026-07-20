@@ -1,7 +1,11 @@
 from src.llm.actions import ActionResult, object_attribute_target
-from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import InferredValueOutput
 from src.llm.tasks._base import ResolutionTask
+
+
+# Attribute columns that typically carry a human-readable entity name.
+# Used to resolve `anchor_entity.name` for domain-knowledge lookups.
+NAME_COLUMNS: tuple[str, ...] = ("name", "title", "product_name", "label")
 
 
 class MissingAttributeValue(ResolutionTask):
@@ -30,8 +34,9 @@ class MissingAttributeValue(ResolutionTask):
                                      and format
         - anchor_entity              summary of the anchor: id, name (when
                                      resolvable), object_type, missing_attribute
-        - attribute_hint             optional per-log hint from the dataset
-                                     hints file (if set, follow it)
+        - exploration_hints          optional log-specific knowledge from the
+                                     exploration phase (observed value
+                                     vocabulary, repair hints, id semantics)
     """
 
     METHOD = """
@@ -40,8 +45,21 @@ class MissingAttributeValue(ResolutionTask):
         2. Look at the anchor's other attributes and events for
            correlations (country → currency, activity `pay_in_eur` →
            `EUR`, etc.).
-        3. If `attribute_hint` is present, follow the guidance it carries
-           — the log's maintainer set it deliberately.
+        3. If `exploration_hints` are present, follow them:
+           - `exploration_hints.attribute.known_values` are values this
+             column is OBSERVED to take in this log (the list may be
+             incomplete when many rows are missing). Strongly prefer
+             returning one of them verbatim: map the evidence onto the
+             closest listed value — e.g. known_values ["Gold", "Silver"]
+             and the evidence says "silver tier" → answer "Silver".
+           - `exploration_hints.attribute.repair_hint` states the
+             log-specific way to infer this attribute;
+             `domain_knowledge_applicable` tells you whether real-world
+             knowledge may be used.
+           - If `exploration_hints.object_type.id_is_entity_name` is true,
+             the anchor's ocel_id (also in `anchor_entity.name`) is the
+             entity's real-world name — identify the entity and recall the
+             factual attribute value from your knowledge.
         4. When local context is silent, fall back to stable real-world
            knowledge about the entity named in `anchor_entity.name` (a
            product's typical weight, a country's currency, …). Match the
@@ -59,7 +77,7 @@ class MissingAttributeValue(ResolutionTask):
            "confidence": 0.95}
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         target = row.get("attribute_name") or row.get("attribute")
         self._attach_peers(conn, ctx, row, target_col=target)
 
@@ -72,19 +90,17 @@ class MissingAttributeValue(ResolutionTask):
             (
                 str(v)
                 for k, v in attrs.items()
-                if k.lower() in {c.lower() for c in hints.name_columns}
+                if k.lower() in {c.lower() for c in NAME_COLUMNS}
                 and v not in (None, "")
             ),
             None,
         )
 
-        # Consult the dataset hints for a per-attribute rule.
-        attr_hint = hints.hint_for(target, object_type)
-        if attr_hint is not None:
-            if not name and attr_hint.id_is_name and anchor_id:
-                name = str(anchor_id)
-            if attr_hint.guidance:
-                ctx["attribute_hint"] = attr_hint.guidance
+        # When exploration established that this type's ocel_id carries the
+        # entity's real-world name, surface it as the name for lookups.
+        hints = ctx.get("exploration_hints", {})
+        if not name and hints.get("object_type", {}).get("id_is_entity_name"):
+            name = str(anchor_id) if anchor_id else None
 
         ctx["anchor_entity"] = {
             "name": name,

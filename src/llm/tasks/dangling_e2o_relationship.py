@@ -1,5 +1,4 @@
 from src.llm.actions import ActionResult, relation_swap_target
-from src.llm.dataset_hints import DatasetHints
 from src.llm.sampling import sample_candidates
 from src.llm.schemas import InferredReferentOutput
 from src.llm.tasks._base import ResolutionTask
@@ -60,7 +59,7 @@ class DanglingE2ORelationship(ResolutionTask):
            "confidence": 0.9}
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         anchor_id, _ = self.anchor(row)
         expected_type = row.get("ocel_qualifier")
         side = row.get("missing_side")

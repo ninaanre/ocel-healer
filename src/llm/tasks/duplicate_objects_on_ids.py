@@ -1,5 +1,4 @@
 from src.llm.actions import ActionResult
-from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import DuplicateResolutionOutput
 from src.llm.tasks._base import ResolutionTask
 
@@ -52,7 +51,7 @@ class DuplicateObjectsOnIds(ResolutionTask):
            "confidence": 0.9}
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         dup_ids = row.get("ocel_ids", "")
         ids = [i.strip() for i in str(dup_ids).split(",") if i.strip()]
         if not ids:

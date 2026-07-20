@@ -1,6 +1,5 @@
 from src.detection.error_detection import _column_info
 from src.llm.actions import ActionResult, object_attribute_target
-from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import CanonicalValueOutput
 from src.llm.sql_utils import quote, table_for_type
 from src.llm.tasks._base import ResolutionTask
@@ -49,7 +48,7 @@ class DuplicateObjectsOnAttributes(ResolutionTask):
            "confidence": 0.9}
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         dup_vals = row.get("attribute_values", "")
         ctx["duplicate_attribute_values"] = [
             v.strip() for v in str(dup_vals).split(",") if v.strip()
