@@ -4,7 +4,6 @@ from typing import Callable, Iterable
 from src.detection.error_detection import _connect
 from src.llm import actions
 from src.llm.client import LLMOutputInvalid, call_llm, call_task
-from src.llm.dataset_hints import load_cached as _load_hints_cached
 from src.llm.personas import BASE_PERSONA, compose as compose_persona
 from src.llm.tasks import get_task
 from src.llm.tasks._base import DetectionResult, DetectionTask, IssueTask
@@ -34,14 +33,18 @@ def _call_task_or_legacy(task: IssueTask, ctx: dict) -> dict:
     return call_llm(user, system_prompt=system)
 
 
-def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
-    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure)."""
+def suggest_repair(
+    issue_key: str, row: dict, sqlite_path: str, *, use_hints: bool = True
+) -> dict:
+    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure).
+
+    `use_hints=False` builds the context without exploration hints — used by
+    the evaluation to measure the hints' effect."""
     task = get_task(issue_key)
     if task is None:
         return actions.unknown_issue_noop(issue_key)
-    hints = _load_hints_cached(sqlite_path)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row, hints=hints)
+        ctx = task.build_context(conn, row, use_hints=use_hints)
     try:
         payload = _call_task_or_legacy(task, ctx)
     except LLMOutputInvalid as e:
@@ -77,9 +80,8 @@ def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionRes
             f"Task {issue_key!r} is a resolution task, not a detection task. "
             f"Use suggest_repair instead."
         )
-    hints = _load_hints_cached(sqlite_path)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row, hints=hints)
+        ctx = task.build_context(conn, row)
     try:
         payload = _call_task_or_legacy(task, ctx)
     except LLMOutputInvalid as e:

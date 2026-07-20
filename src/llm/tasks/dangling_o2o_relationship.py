@@ -1,5 +1,4 @@
 from src.llm.actions import ActionResult, relation_swap_target
-from src.llm.dataset_hints import DatasetHints
 from src.llm.sampling import sample_candidates
 from src.llm.schemas import InferredReferentOutput
 from src.llm.tasks._base import ResolutionTask
@@ -60,7 +59,7 @@ class DanglingO2ORelationship(ResolutionTask):
             return row.get("ocel_target_id"), row.get("target_type")
         return row.get("ocel_source_id"), row.get("source_type")
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         anchor_id, _ = self.anchor(row)
         # We don't know the expected type from the qualifier alone here
         # (relations like 'belongs_to' don't name the target type), so

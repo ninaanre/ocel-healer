@@ -1,14 +1,16 @@
-import inspect
 import sqlite3
 import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from pydantic import BaseModel
 
 from src.detection.error_detection import _column_info
-from src.llm.dataset_hints import DatasetHints
+from src.exploration.db_profiler import schema_fingerprint
+from src.exploration.hint_selector import select_hints
+from src.exploration.report_store import load_guide, load_profile
 from src.llm.sampling import sample_peers
 from src.llm.sql_utils import quote, table_for_type
 from src.llm.tasks._template import render_task_prompt
@@ -51,8 +53,13 @@ class IssueTask(ABC):
     Subclasses set `issue_key`, `family`, `OutputModel`, and the four
     section strings TASK / INPUTS / METHOD / EXAMPLES. They implement the
     appropriate parse method and optionally override `extend_context`,
-    `anchor`, and `suppressed_target`. Importing the module self-registers
-    via `__init_subclass__`.
+    `anchor`, `select_hints` and `suppressed_target`. Importing the module
+    self-registers via `__init_subclass__`.
+
+    Dataset knowledge comes from the exploration artifacts (deterministic
+    profile + optional LLM guide) and is attached as
+    `ctx["exploration_hints"]` -- see `_attach_exploration_hints`. There is
+    no hand-written hints file.
     """
 
     issue_key: ClassVar[str] = ""
@@ -108,21 +115,25 @@ class IssueTask(ABC):
         conn: sqlite3.Connection,
         row: dict,
         *,
-        hints: DatasetHints | None = None,
+        use_hints: bool = True,
     ) -> dict:
-        """Default context: violation + candidate_types + (anchor object + events)."""
+        """Default context: violation + candidate_types + (anchor object + events)
+        + exploration hints when fresh artifacts exist for this database.
+
+        `use_hints=False` skips the exploration lookup — the evaluation uses
+        it to compare repair quality with and without exploration knowledge."""
         from src.detection.error_detection import _object_type_tables
 
-        hints = hints or DatasetHints.empty()
         ctx: dict[str, Any] = {"issue_key": self.issue_key, "violation": dict(row)}
         ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
         anchor_id, anchor_type = self.anchor(row)
         if anchor_id:
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
             self._attach_events(conn, ctx, anchor_id)
-        if hints.data_semantics:
-            ctx["data_semantics"] = hints.data_semantics
-        self._call_extend_context(conn, ctx, row, hints)
+        # Hints go in before extend_context so task-specific context can use them.
+        if use_hints:
+            self._attach_exploration_hints(conn, ctx, row)
+        self.extend_context(conn, ctx, row)
         return ctx
 
     def anchor(self, row: dict) -> tuple[str | None, str | None]:
@@ -132,35 +143,54 @@ class IssueTask(ABC):
             row.get("object_type") or row.get("source_type"),
         )
 
-    def extend_context(
-        self,
-        conn: sqlite3.Connection,
-        ctx: dict,
-        row: dict,
-        *,
-        hints: DatasetHints,
-    ) -> None:
+    def extend_context(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
         """Hook for task-specific context (peers, candidates, duplicates).
 
-        New-style tasks accept `hints=` (keyword). Legacy tasks with the
-        old signature `extend_context(conn, ctx, row)` still work — see
-        `_call_extend_context` for the shim.
+        Exploration knowledge, when available, is already attached as
+        `ctx["exploration_hints"]` by the time this runs.
         """
         return
 
-    def _call_extend_context(
-        self,
-        conn: sqlite3.Connection,
-        ctx: dict,
-        row: dict,
-        hints: DatasetHints,
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
+        """Which exploration slice this task wants in its context. Facts come
+        from the profile, interpretations from the (optional) guide. Default:
+        the generic row-driven selection (object type / attribute / qualifier).
+        Tasks needing a different view override this."""
+        return select_hints(profile, guide, row)
+
+    def _attach_exploration_hints(
+        self, conn: sqlite3.Connection, ctx: dict, row: dict
     ) -> None:
-        """Bridge new-style (hints kw) and legacy (no hints) extend_context signatures."""
-        sig = inspect.signature(self.extend_context)
-        if "hints" in sig.parameters:
-            self.extend_context(conn, ctx, row, hints=hints)
-        else:
-            self.extend_context(conn, ctx, row)
+        """Attach `exploration_hints` when fresh exploration artifacts exist.
+
+        The deterministic profile is required; the LLM guide is optional —
+        facts-only hints are still valuable when guide sections failed.
+        Best-effort by design: missing/stale artifacts or any error simply
+        mean no hints — repair must work exactly as before without them.
+        """
+        try:
+            db_file = next(
+                (f for _, name, f in conn.execute("PRAGMA database_list") if name == "main"),
+                None,
+            )
+            if not db_file:
+                return
+            # Artifacts live next to the data: <db_dir>/exploration/<db_stem>/
+            base_dir = Path(db_file).parent / "exploration"
+            profile = load_profile(db_file, base_dir)
+            if profile is None:
+                return
+            current = schema_fingerprint(conn)
+            if profile.get("schema_fingerprint") != current:
+                return
+            guide = load_guide(db_file, base_dir)
+            if guide is not None and guide.get("source_fingerprint") != current:
+                guide = None  # stale guide: keep the facts, drop the prose
+            hints = self.select_hints(profile, guide, row)
+            if hints:
+                ctx["exploration_hints"] = hints
+        except Exception:  # noqa: BLE001 — hints are optional, never fatal
+            return
 
     @abstractmethod
     def parse_payload(self, row: dict, payload: dict) -> "ActionResult":
