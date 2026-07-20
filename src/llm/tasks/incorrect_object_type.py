@@ -1,3 +1,4 @@
+from src.exploration.hint_selector import all_type_summaries
 from src.llm.schemas import InferredTypeOutput
 from src.llm.tasks._base import DetectionResult, DetectionTask
 
@@ -6,6 +7,11 @@ class IncorrectObjectType(DetectionTask):
     issue_key = "incorrect_object_type"
     family = "type"
     OutputModel = InferredTypeOutput
+
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
+        # The current type is under suspicion — validating it needs the
+        # overview of ALL types and their id templates, not just its own slice.
+        return {"all_object_types": all_type_summaries(profile, guide)}
 
     TASK = """
         An object row has a non-empty `ocel_type`, but that type may be incorrect.
@@ -30,6 +36,9 @@ class IncorrectObjectType(DetectionTask):
                that contradicts the current type is STRONG on its own — do NOT
                downgrade it to "weak" just because events and attributes are
                sparse.
+             - If `exploration_hints.all_object_types` is present, match the id
+               against each type's `id_template` (digit runs shown as `#`): an id
+               matching another type's template is strong evidence for that type.
              - Event activities + qualifiers (e.g. `place_order` with qualifier
                `customer` implies the object is a customer).
              - Attribute names / shapes (`email`, `country` → customer;

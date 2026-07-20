@@ -1,5 +1,4 @@
 from src.llm.actions import ActionResult, object_attribute_target
-from src.llm.dataset_hints import DatasetHints
 from src.llm.schemas import CoercedValueOutput
 from src.llm.tasks._base import ResolutionTask
 
@@ -54,7 +53,7 @@ class IncorrectAttributeDatatype(ResolutionTask):
           ('banana', INTEGER) → null   # no meaning-preserving coercion
     """
 
-    def extend_context(self, conn, ctx: dict, row: dict, *, hints: DatasetHints) -> None:
+    def extend_context(self, conn, ctx: dict, row: dict) -> None:
         # Stratify peers on the column being repaired so the LLM sees
         # examples of correctly typed values.
         target = row.get("attribute_name") or row.get("attribute")
