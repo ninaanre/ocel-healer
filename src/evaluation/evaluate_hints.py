@@ -48,9 +48,6 @@ INJECTIONS = [
     ("object_Packages", "weight", 8),
 ]
 
-NUMERIC_TOLERANCE = 0.10  # relative error counted as "within tolerance"
-
-
 # --- dataset preparation ----------------------------------------------------
 
 def prepare_eval_db(
@@ -128,17 +125,18 @@ def _as_float(value: Any) -> float | None:
 
 
 def score_one(proposed: Any, true_value: Any) -> dict[str, Any]:
-    """Exact match, numeric tolerance and relative error for one proposal."""
+    """Exact match plus, for numeric fields, absolute/relative deviation.
+
+    No pass/fail threshold: deviation is reported as a continuous value so
+    the report can show how far off a miss was, not just whether it cleared
+    an arbitrary cutoff."""
     p_num, t_num = _as_float(proposed), _as_float(true_value)
     if p_num is not None and t_num is not None:
-        rel_err = abs(p_num - t_num) / abs(t_num) if t_num != 0 else (0.0 if p_num == 0 else float("inf"))
-        return {
-            "exact": p_num == t_num,
-            "within_tol": rel_err <= NUMERIC_TOLERANCE,
-            "rel_err": rel_err,
-        }
+        abs_err = abs(p_num - t_num)
+        rel_err = abs_err / abs(t_num) if t_num != 0 else (0.0 if p_num == 0 else float("inf"))
+        return {"exact": abs_err == 0, "abs_err": abs_err, "rel_err": rel_err}
     exact = str(proposed).strip().lower() == str(true_value).strip().lower()
-    return {"exact": exact, "within_tol": exact, "rel_err": None}
+    return {"exact": exact, "abs_err": None, "rel_err": None}
 
 
 def summarize(records: list[dict]) -> dict[str, Any]:
@@ -146,16 +144,16 @@ def summarize(records: list[dict]) -> dict[str, Any]:
     total = len(records)
     attempted = [r for r in records if r["kind"] == "update"]
     exact = [r for r in attempted if r["exact"]]
-    within = [r for r in attempted if r["within_tol"]]
-    rel_errs = [r["rel_err"] for r in attempted if r["rel_err"] is not None and r["rel_err"] != float("inf")]
+    abs_errs = [r["abs_err"] for r in attempted if r.get("abs_err") is not None and r["abs_err"] != float("inf")]
+    rel_errs = [r["rel_err"] for r in attempted if r.get("rel_err") is not None and r["rel_err"] != float("inf")]
     confidences = [r["confidence"] for r in attempted]
     return {
         "total": total,
+        "attempted": len(attempted),
         "coverage": len(attempted) / total if total else 0.0,
+        "exact": len(exact),
         "exact_of_attempted": len(exact) / len(attempted) if attempted else 0.0,
-        "exact_overall": len(exact) / total if total else 0.0,
-        "within_tol_of_attempted": len(within) / len(attempted) if attempted else 0.0,
-        "within_tol_overall": len(within) / total if total else 0.0,
+        "mean_abs_err": sum(abs_errs) / len(abs_errs) if abs_errs else None,
         "mean_rel_err": sum(rel_errs) / len(rel_errs) if rel_errs else None,
         "mean_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
         "errors": sum(1 for r in records if r["kind"] == "error"),
@@ -217,12 +215,40 @@ def _fmt_pct(x: float) -> str:
 
 
 def _metrics_row(label: str, s: dict) -> str:
-    rel = f"{s['mean_rel_err']:.2f}" if s["mean_rel_err"] is not None else "—"
+    abs_e = f"{s['mean_abs_err']:.3g}" if s["mean_abs_err"] is not None else "—"
+    rel_e = f"{s['mean_rel_err']:.1%}" if s["mean_rel_err"] is not None else "—"
     return (
         f"| {label} | {s['total']} | {_fmt_pct(s['coverage'])} | "
-        f"{_fmt_pct(s['exact_of_attempted'])} | {_fmt_pct(s['within_tol_of_attempted'])} | "
-        f"{_fmt_pct(s['within_tol_overall'])} | {rel} | {s['mean_confidence']:.2f} |"
+        f"{s['exact']}/{s['attempted']} ({_fmt_pct(s['exact_of_attempted'])}) | "
+        f"{abs_e} | {rel_e} | {s['mean_confidence']:.2f} |"
     )
+
+
+def _row_winner(a: dict, b: dict) -> tuple[bool, bool]:
+    """Which side(s) get the comparative checkmark in the per-violation table:
+    whichever proposal is closer to groundtruth, both on a tie. Neither side
+    is marked when either declined (kind != 'update') -- there is nothing to
+    compare a non-answer against."""
+    if a.get("kind") != "update" or b.get("kind") != "update":
+        return False, False
+    a_err, b_err = a.get("abs_err"), b.get("abs_err")
+    if a_err is not None and b_err is not None:
+        return (a_err <= b_err, b_err <= a_err)
+    # Categorical (or unparseable numeric): correctness is binary, not a distance.
+    return (bool(a.get("exact")), bool(b.get("exact")))
+
+
+def _detail_cell(r: dict, mark: bool) -> tuple[str, str]:
+    """(proposed-value text, delta text) for one side of a per-violation row."""
+    if r.get("kind") != "update":
+        return str(r.get("kind", "—")), "—"
+    check = "✓ " if mark else ""
+    if r.get("abs_err") is not None:
+        pct = f" ({r['rel_err']:.1%})" if r.get("rel_err") not in (None, float("inf")) else ""
+        delta = f"{check}{r['abs_err']:.3g}{pct}"
+    else:
+        delta = f"{check}{'exact' if r.get('exact') else 'mismatch'}"
+    return str(r.get("proposed")), delta
 
 
 def render_eval_report(meta: dict, records: list[dict]) -> str:
@@ -230,8 +256,8 @@ def render_eval_report(meta: dict, records: list[dict]) -> str:
     for r in records:
         arms[r["arm"]].append(r)
 
-    header = "| arm | n | coverage | exact (of attempted) | within 10% (of attempted) | within 10% (overall) | mean rel. err | mean conf |"
-    sep = "|---|---|---|---|---|---|---|---|"
+    header = "| arm | n | coverage | exact (of attempted) | mean abs. dev. | mean rel. dev. | mean conf |"
+    sep = "|---|---|---|---|---|---|---|"
 
     lines = [
         "# Exploration Hints Evaluation",
@@ -260,16 +286,20 @@ def render_eval_report(meta: dict, records: list[dict]) -> str:
     lines += [
         "## Per-violation detail",
         "",
-        "| object | attribute | groundtruth | A: with hints | ✓ | B: without hints | ✓ |",
+        "_✓ marks whichever arm landed closer to groundtruth for that row (both marked on a tie)._",
+        "",
+        "| object | attribute | groundtruth | A: with hints | Δ (A) | B: without hints | Δ (B) |",
         "|---|---|---|---|---|---|---|",
     ]
     b_by_key = {(r["ocel_id"], r["attribute"]): r for r in arms["without_hints"]}
     for a in arms["with_hints"]:
         b = b_by_key.get((a["ocel_id"], a["attribute"]), {})
-        mark = lambda r: "✅" if r.get("within_tol") else ("—" if r.get("kind") != "update" else "❌")
+        mark_a, mark_b = _row_winner(a, b)
+        val_a, delta_a = _detail_cell(a, mark_a)
+        val_b, delta_b = _detail_cell(b, mark_b)
         lines.append(
             f"| {a['ocel_id']} | {a['attribute']} | {a['true_value']} "
-            f"| {a['proposed']} | {mark(a)} | {b.get('proposed')} | {mark(b)} |"
+            f"| {val_a} | {delta_a} | {val_b} | {delta_b} |"
         )
 
     n_errors = sum(1 for r in records if r["kind"] == "error")
