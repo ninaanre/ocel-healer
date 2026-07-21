@@ -3,28 +3,65 @@ from typing import Callable, Iterable
 
 from src.detection.error_detection import _connect
 from src.llm import actions
-from src.llm.client import call_llm
+from src.llm.client import LLMOutputInvalid, call_llm, call_task
+from src.llm.personas import BASE_PERSONA, compose as compose_persona
 from src.llm.tasks import get_task
-from src.llm.tasks._base import DetectionResult, DetectionTask
+from src.llm.tasks._base import DetectionResult, DetectionTask, IssueTask
 
 
-def _build_user_prompt(task, ctx: dict) -> str:
-    return (
+def _build_messages(task: IssueTask, ctx: dict) -> tuple[str, str]:
+    """Return (system, user). System = base + family persona; user = task prompt + context."""
+    system = compose_persona(task.family) if task.family else BASE_PERSONA
+    user = (
         task.prompt
         + "\n\nContext:\n```json\n"
         + json.dumps(ctx, default=str, indent=2)
         + "\n```"
     )
+    return system, user
 
 
-def suggest_repair(issue_key: str, row: dict, sqlite_path: str) -> dict:
-    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure)."""
+def _call_task_or_legacy(task: IssueTask, ctx: dict) -> dict:
+    """Route through `call_task` (validated + retry) if the task declares an
+    OutputModel; otherwise fall back to the legacy unvalidated `call_llm`.
+
+    Once every task is migrated, drop this branch and always use `call_task`.
+    """
+    system, user = _build_messages(task, ctx)
+    if task.OutputModel is not None:
+        return call_task(system, user, task.OutputModel)
+    return call_llm(user, system_prompt=system)
+
+
+def suggest_repair(
+    issue_key: str, row: dict, sqlite_path: str, *, use_hints: bool = True
+) -> dict:
+    """Ask the LLM how to repair `row`. Returns an action dict (kind='noop' if unsure).
+
+    `use_hints=False` builds the context without exploration hints — used by
+    the evaluation to measure the hints' effect."""
     task = get_task(issue_key)
     if task is None:
         return actions.unknown_issue_noop(issue_key)
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row)
-    payload = call_llm(_build_user_prompt(task, ctx))
+        ctx = task.build_context(conn, row, use_hints=use_hints)
+    try:
+        payload = _call_task_or_legacy(task, ctx)
+    except LLMOutputInvalid as e:
+        # Give the task a chance to fire a deterministic branch (e.g.
+        # DuplicateObjectsOnIds pure same-type case) that consumes only
+        # the detector row. from_task_result is confidence-gated, so we
+        # inject a max-confidence stub payload plus the LLM error on the
+        # rationale — the deterministic branch inside parse_payload
+        # ignores the payload contents anyway. If parse_payload has no
+        # deterministic branch it returns decline/unrouted (rendered as
+        # a noop with the LLM error surfaced).
+        try:
+            stub = {"confidence": 1.0,
+                    "rationale": f"LLM output invalid: {e}"}
+            return actions.from_task_result(task, row, stub)
+        except Exception:  # noqa: BLE001 -- parse_payload itself failed
+            return actions.malformed_output_noop(task, row, str(e))
     return actions.from_task_result(task, row, payload)
 
 
@@ -45,7 +82,15 @@ def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionRes
         )
     with _connect(sqlite_path) as conn:
         ctx = task.build_context(conn, row)
-    payload = call_llm(_build_user_prompt(task, ctx))
+    try:
+        payload = _call_task_or_legacy(task, ctx)
+    except LLMOutputInvalid as e:
+        return DetectionResult(
+            flagged=False,
+            rationale=f"LLM output invalid: {e}",
+            confidence=0.0,
+            suggested_value=None,
+        )
     return task.parse_detection(row, payload)
 
 
