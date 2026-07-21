@@ -13,7 +13,12 @@ dependencies = [
     "jupyter",
     "ipykernel",
     "marimo",
+    "pydantic>=2",
+    "pyyaml",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 # Treat `src` itself as the importable package, so existing imports like
 # `from src.detection.error_detection import detect_all` keep working.
