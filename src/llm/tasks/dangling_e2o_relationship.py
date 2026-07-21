@@ -1,4 +1,6 @@
 from src.llm.actions import ActionResult, relation_swap_target
+from src.llm.sampling import sample_candidates
+from src.llm.schemas import InferredReferentOutput
 from src.llm.tasks._base import ResolutionTask
 
 
@@ -10,66 +12,73 @@ _E2O_SIDES = {
 
 class DanglingE2ORelationship(ResolutionTask):
     issue_key = "dangling_e2o_relationship"
+    family = "relation"
+    OutputModel = InferredReferentOutput
 
-    PROMPT = """\
-        <task>
-        An `event_object` relation references an event or object that does not
-        exist. Pick the most likely intended referent for the missing side.
-        </task>
+    TASK = """
+        An `event_object` relation references an event or object that does
+        not exist. Pick the most likely intended referent for the missing
+        side from the candidate list.
+    """
 
-        <inputs>
-          - violation.missing_side       'object' or 'event' — which end is missing
-          - violation.ocel_qualifier     names the relationship (often implies the
-                                         expected type of the missing side)
-          - object                       the known end's id, type, and attributes
-          - events                       up to 8 events touching the known object
-                                         (limited use here, but check for context)
-          - candidate_objects            up to 200 {ocel_id, ocel_type} — present
-                                         when missing_side='object'
-          - candidate_events             up to 200 {ocel_id, ocel_type} — present
-                                         when missing_side='event'
-        </inputs>
+    INPUTS = """
+        - violation.missing_side       'object' or 'event' — which end is missing
+        - violation.ocel_qualifier     names the relationship (usually
+                                       implies the expected type of the
+                                       missing side)
+        - object                       the known end's id, type, attributes
+        - events                       up to 8 events touching the known
+                                       object (context only)
+        - candidate_objects            up to 50 {ocel_id, ocel_type} — set
+                                       when missing_side='object', pre-filtered
+                                       by qualifier when possible (up to 200
+                                       when the qualifier gives no type hint)
+        - candidate_events             up to 200 {ocel_id, ocel_type} — set
+                                       when missing_side='event'
+    """
 
-        <method>
-          1. Read `violation.ocel_qualifier`; it usually names a role (e.g.
-             'customer', 'item') that pins the expected type of the missing end.
-          2. Filter the candidate list to entries whose `ocel_type` matches that
-             expected type.
-          3. Among the survivors, prefer ids that share a naming prefix or
-             convention with the known end's id.
-          4. Return a verbatim `ocel_id` from the candidate list.
-        </method>
+    METHOD = """
+        1. Read `violation.ocel_qualifier` — it usually names a role that
+           pins the expected `ocel_type` of the missing side (e.g.
+           qualifier `customer` selects `ocel_type='customer'`).
+        2. Filter the candidate list to entries whose `ocel_type` matches.
+        3. Among survivors, prefer ids that share a naming prefix or
+           convention with the known end's id.
+        4. Return one `ocel_id` from the candidate list verbatim, or null
+           when no candidate plausibly matches.
+    """
 
-        <example>
-          violation.missing_side='object', violation.ocel_qualifier='customer'
-          object={ocel_id:'e-42', ocel_type:'place_order'}
-          candidate_objects=[{ocel_id:'c-1', ocel_type:'customer'}, {ocel_id:'p-9', ocel_type:'product'}]
-          → {"inferred_referent": "c-1", "rationale": "qualifier 'customer' selects ocel_type='customer'; only c-1 matches", "confidence": 0.9}
-        </example>
-
-        <output>
-        JSON: {"inferred_referent": str|null, "rationale": str, "confidence": number}
-        </output>
+    EXAMPLES = """
+        violation.missing_side = 'object'
+        violation.ocel_qualifier = 'customer'
+        object = {ocel_id: 'e-42', ocel_type: 'place_order'}
+        candidate_objects = [{ocel_id: 'c-1', ocel_type: 'customer'},
+                             {ocel_id: 'p-9', ocel_type: 'product'}]
+        → {"inferred_referent": "c-1",
+           "rationale": "qualifier 'customer' selects ocel_type='customer'; only c-1 matches",
+           "confidence": 0.9}
     """
 
     def extend_context(self, conn, ctx: dict, row: dict) -> None:
+        anchor_id, _ = self.anchor(row)
+        expected_type = row.get("ocel_qualifier")
         side = row.get("missing_side")
         if side == "object":
-            ctx["candidate_objects"] = [
-                {"ocel_id": r[0], "ocel_type": r[1]}
-                for r in conn.execute(
-                    "SELECT ocel_id, ocel_type FROM object "
-                    "WHERE ocel_id IS NOT NULL LIMIT 200"
-                ).fetchall()
-            ]
+            ctx["candidate_objects"] = sample_candidates(
+                conn,
+                anchor_id=anchor_id,
+                expected_type=expected_type,
+                kind="object",
+                k=50,
+            )
         else:
-            ctx["candidate_events"] = [
-                {"ocel_id": r[0], "ocel_type": r[1]}
-                for r in conn.execute(
-                    "SELECT ocel_id, ocel_type FROM event "
-                    "WHERE ocel_id IS NOT NULL LIMIT 200"
-                ).fetchall()
-            ]
+            ctx["candidate_events"] = sample_candidates(
+                conn,
+                anchor_id=anchor_id,
+                expected_type=None,  # events don't share the object-type registry
+                kind="event",
+                k=50,
+            )
 
     def parse_payload(self, row: dict, payload: dict) -> ActionResult:
         new = payload.get("inferred_referent")

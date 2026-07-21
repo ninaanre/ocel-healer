@@ -2,10 +2,18 @@ import sqlite3
 import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
-from src.detection.error_detection import _column_info, _object_type_tables
+from pydantic import BaseModel
+
+from src.detection.error_detection import _column_info
+from src.exploration.db_profiler import schema_fingerprint
+from src.exploration.hint_selector import select_hints
+from src.exploration.report_store import load_guide, load_profile
+from src.llm.sampling import sample_peers
 from src.llm.sql_utils import quote, table_for_type
+from src.llm.tasks._template import render_task_prompt
 
 if TYPE_CHECKING:
     from src.llm.actions import ActionResult
@@ -42,14 +50,38 @@ class IssueTask(ABC):
         an ActionResult so the existing suggest_repair / apply_repair path
         still works for fix-time calls.
 
-    Subclasses set `issue_key` and `PROMPT`, implement the appropriate parse
-    method, and optionally override `extend_context`, `anchor`, and
-    `suppressed_target`. Importing the module self-registers via
-    `__init_subclass__`.
+    Subclasses set `issue_key`, `family`, `OutputModel`, and the four
+    section strings TASK / INPUTS / METHOD / EXAMPLES. They implement the
+    appropriate parse method and optionally override `extend_context`,
+    `anchor`, `select_hints` and `suppressed_target`. Importing the module
+    self-registers via `__init_subclass__`.
+
+    Dataset knowledge comes from the exploration artifacts (deterministic
+    profile + optional LLM guide) and is attached as
+    `ctx["exploration_hints"]` -- see `_attach_exploration_hints`. There is
+    no hand-written hints file.
     """
 
     issue_key: ClassVar[str] = ""
+
+    # Task-family key used to select a family persona (see personas.py).
+    # One of "type", "attribute", "relation", "duplicate", "temporal".
+    family: ClassVar[str] = ""
+
+    # Pydantic model the LLM's reply is validated against.
+    OutputModel: ClassVar[type[BaseModel] | None] = None
+
+    # Prompt sections. Each is a short string; the template splices them
+    # into the seven-section skeleton (see tasks/_template.py).
+    TASK: ClassVar[str] = ""
+    INPUTS: ClassVar[str] = ""
+    METHOD: ClassVar[str] = ""
+    EXAMPLES: ClassVar[str] = ""
+
+    # Legacy: pre-template tasks store the whole prompt in one string.
+    # New tasks leave this empty and set TASK/INPUTS/METHOD/EXAMPLES instead.
     PROMPT: ClassVar[str] = ""
+
     min_confidence: ClassVar[float | None] = None  # None → use global MIN_CONFIDENCE
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -62,16 +94,45 @@ class IssueTask(ABC):
 
     @property
     def prompt(self) -> str:
-        return textwrap.dedent(self.PROMPT).strip()
+        if self.OutputModel is not None and (self.TASK or self.METHOD):
+            return render_task_prompt(
+                task=self.TASK,
+                inputs=self.INPUTS,
+                method=self.METHOD,
+                examples=self.EXAMPLES,
+                output_model=self.OutputModel,
+            )
+        # Legacy path: fall back to the monolithic PROMPT string.
+        if self.PROMPT:
+            return textwrap.dedent(self.PROMPT).strip()
+        raise NotImplementedError(
+            f"{type(self).__name__} must set OutputModel + TASK/INPUTS/METHOD/EXAMPLES "
+            "(new-style) or PROMPT (legacy) to render its prompt."
+        )
 
-    def build_context(self, conn: sqlite3.Connection, row: dict) -> dict:
-        """Default context: violation + candidate_types + (anchor object + events)."""
+    def build_context(
+        self,
+        conn: sqlite3.Connection,
+        row: dict,
+        *,
+        use_hints: bool = True,
+    ) -> dict:
+        """Default context: violation + candidate_types + (anchor object + events)
+        + exploration hints when fresh artifacts exist for this database.
+
+        `use_hints=False` skips the exploration lookup — the evaluation uses
+        it to compare repair quality with and without exploration knowledge."""
+        from src.detection.error_detection import _object_type_tables
+
         ctx: dict[str, Any] = {"issue_key": self.issue_key, "violation": dict(row)}
         ctx["candidate_types"] = [t for t, _ in _object_type_tables(conn)]
         anchor_id, anchor_type = self.anchor(row)
         if anchor_id:
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
             self._attach_events(conn, ctx, anchor_id)
+        # Hints go in before extend_context so task-specific context can use them.
+        if use_hints:
+            self._attach_exploration_hints(conn, ctx, row)
         self.extend_context(conn, ctx, row)
         return ctx
 
@@ -83,8 +144,53 @@ class IssueTask(ABC):
         )
 
     def extend_context(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
-        """Hook for task-specific context (peers, candidates, duplicates)."""
+        """Hook for task-specific context (peers, candidates, duplicates).
+
+        Exploration knowledge, when available, is already attached as
+        `ctx["exploration_hints"]` by the time this runs.
+        """
         return
+
+    def select_hints(self, profile: dict, guide: dict | None, row: dict) -> dict:
+        """Which exploration slice this task wants in its context. Facts come
+        from the profile, interpretations from the (optional) guide. Default:
+        the generic row-driven selection (object type / attribute / qualifier).
+        Tasks needing a different view override this."""
+        return select_hints(profile, guide, row)
+
+    def _attach_exploration_hints(
+        self, conn: sqlite3.Connection, ctx: dict, row: dict
+    ) -> None:
+        """Attach `exploration_hints` when fresh exploration artifacts exist.
+
+        The deterministic profile is required; the LLM guide is optional —
+        facts-only hints are still valuable when guide sections failed.
+        Best-effort by design: missing/stale artifacts or any error simply
+        mean no hints — repair must work exactly as before without them.
+        """
+        try:
+            db_file = next(
+                (f for _, name, f in conn.execute("PRAGMA database_list") if name == "main"),
+                None,
+            )
+            if not db_file:
+                return
+            # Artifacts live next to the data: <db_dir>/exploration/<db_stem>/
+            base_dir = Path(db_file).parent / "exploration"
+            profile = load_profile(db_file, base_dir)
+            if profile is None:
+                return
+            current = schema_fingerprint(conn)
+            if profile.get("schema_fingerprint") != current:
+                return
+            guide = load_guide(db_file, base_dir)
+            if guide is not None and guide.get("source_fingerprint") != current:
+                guide = None  # stale guide: keep the facts, drop the prose
+            hints = self.select_hints(profile, guide, row)
+            if hints:
+                ctx["exploration_hints"] = hints
+        except Exception:  # noqa: BLE001 — hints are optional, never fatal
+            return
 
     @abstractmethod
     def parse_payload(self, row: dict, payload: dict) -> "ActionResult":
@@ -128,31 +234,33 @@ class IssueTask(ABC):
             ).fetchall()
         ]
 
-    def _attach_peers(self, conn: sqlite3.Connection, ctx: dict, row: dict) -> None:
-        """Attach `peer_objects`: up to 5 other rows of the same type, full
-        attribute rows. Used by missing_attribute_value / incorrect_attribute_datatype
-        so the LLM can learn typical value shape/format."""
+    def _attach_peers(
+        self,
+        conn: sqlite3.Connection,
+        ctx: dict,
+        row: dict,
+        *,
+        target_col: str | None = None,
+    ) -> None:
+        """Attach `peer_objects`: up to 5 peers of the same type, full attribute rows.
+
+        Delegates to `sampling.sample_peers` for deterministic + representative
+        selection. When `target_col` is given, stratifies so at least half the
+        peers have a non-null value in that column.
+        """
         anchor_id, anchor_type = self.anchor(row)
         if not anchor_id:
             return
-        table = table_for_type(conn, anchor_type)
-        if not table:
-            return
-        cols = [c for c, _ in _column_info(conn, table)]
-        if not cols:
-            return
-        quoted = ", ".join(quote(c) for c in cols)
-        all_cols = [name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
-        where = (
-            'AND "ocel_changed_field" IS NULL'
-            if "ocel_changed_field" in all_cols
-            else ""
+        peers = sample_peers(
+            conn,
+            row,
+            anchor_id=anchor_id,
+            anchor_type=anchor_type,
+            k=5,
+            target_col=target_col,
         )
-        peers = conn.execute(
-            f'SELECT {quoted} FROM {quote(table)} WHERE ocel_id != ? {where} LIMIT 5',
-            (anchor_id,),
-        ).fetchall()
-        ctx["peer_objects"] = [dict(zip(cols, p)) for p in peers]
+        if peers:
+            ctx["peer_objects"] = peers
 
 
 # --- Intermediate base classes -------------------------------------------
