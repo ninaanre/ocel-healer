@@ -252,6 +252,7 @@ IS_BAD_FOR_ISSUE: dict[str, Callable[[dict, str], bool]] = {
     "missing_event":                     bad_col("ocel_event_id"),
     "missing_event_type":                bad_col("ocel_type"),
     "missing_event_timestamp":           bad_col("actual_value"),
+    "missing_event_attribute_value":     bad_col("actual_value"),
     "missing_object":                    bad_col("ocel_object_id"),
     "missing_object_type":               bad_col("ocel_type"),
     "missing_attribute_value":           bad_col("actual_value"),
@@ -261,6 +262,9 @@ IS_BAD_FOR_ISSUE: dict[str, Callable[[dict, str], bool]] = {
     "duplicate_objects_on_attributes":   bad_dup_attrs,
     "incorrect_object_type":             bad_col("ocel_type"),
     "incorrect_attribute_datatype":      bad_col("actual_value"),
+    "incorrect_attribute_value":         bad_col("actual_value"),
+    "incorrect_event_attribute_datatype": bad_col("actual_value"),
+    "incorrect_event_attribute_value":    bad_col("actual_value"),
 }
 
 
