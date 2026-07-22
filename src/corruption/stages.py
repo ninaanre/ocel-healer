@@ -15,7 +15,6 @@ from typing import Callable
 
 from src.corruption._common import (
     DEFAULT_CLEAN_PATH,
-    DEFAULT_DIRTY_PATH,
     DEFAULT_FULL_PATH,
     _default_dst_for_level,
     _remove_object_primary_key,
@@ -32,11 +31,9 @@ from src.corruption.event_issues import (
     inject_missing_event_type_whitespace_package_hard,
 )
 from src.corruption.object_issues import (
-    inject_duplicate_objects_on_attributes,
     inject_duplicate_objects_on_attributes_clone_employee,
     inject_duplicate_objects_on_attributes_clone_order_and_referenced,
     inject_duplicate_objects_on_attributes_clone_product,
-    inject_duplicate_objects_on_ids,
     inject_duplicate_objects_on_ids_conflicting_types,
     inject_duplicate_objects_on_ids_product,
     inject_duplicate_objects_on_ids_triple_null_type,
@@ -49,17 +46,14 @@ from src.corruption.object_issues import (
     inject_missing_attribute_value_empty_string_role,
     inject_missing_attribute_value_null_order_price,
     inject_missing_attribute_value_null_product_weight,
-    inject_missing_object_type,
     inject_missing_object_type_empty_string_order,
     inject_missing_object_type_null_employee,
     inject_missing_object_type_whitespace_product,
 )
 from src.corruption.relation_issues import (
-    inject_dangling_e2o_relationship_event,
     inject_dangling_e2o_relationship_missing_both,
     inject_dangling_e2o_relationship_missing_event,
     inject_dangling_e2o_relationship_missing_object_easy,
-    inject_dangling_e2o_relationship_object,
     inject_dangling_o2o_relationship_missing_both_typo,
     inject_dangling_o2o_relationship_missing_source,
     inject_dangling_o2o_relationship_missing_target,
@@ -73,7 +67,7 @@ def corrupt_database(
     src_path: str,
     dst_path: str | None = None,
     *,
-    level: str = "legacy",
+    level: str = "all",
 ) -> str:
     """Copy `src_path` to `dst_path` and inject corruptions for `level`.
 
@@ -94,15 +88,6 @@ def corrupt_database(
             stage(conn)
         conn.commit()
     return dst_path
-
-
-def _stage_legacy(conn: sqlite3.Connection) -> None:
-    """Reproduce the pre-`level` corruption sequence exactly."""
-    duplicate_id = inject_duplicate_objects_on_ids(conn)
-    inject_duplicate_objects_on_attributes(conn)
-    inject_missing_object_type(conn, exclude_id=duplicate_id)
-    inject_dangling_e2o_relationship_object(conn)
-    inject_dangling_e2o_relationship_event(conn)
 
 
 def _stage_easy(conn: sqlite3.Connection) -> None:
@@ -160,7 +145,6 @@ def _stage_hard(conn: sqlite3.Connection) -> None:
 
 
 _LEVEL_STAGES: dict[str, list[Callable[[sqlite3.Connection], None]]] = {
-    "legacy": [_stage_legacy],
     "easy":   [_stage_easy],
     "medium": [_stage_medium],
     "hard":   [_stage_hard],
@@ -171,6 +155,5 @@ _LEVEL_STAGES: dict[str, list[Callable[[sqlite3.Connection], None]]] = {
 __all__ = [
     "corrupt_database",
     "DEFAULT_CLEAN_PATH",
-    "DEFAULT_DIRTY_PATH",
     "DEFAULT_FULL_PATH",
 ]

@@ -22,7 +22,6 @@ Injectors are grouped by OCEL dimension:
 point used by the dashboard, notebooks and tests. It copies the source SQLite
 file to the destination and runs the selected `level`:
 
-    legacy — the original hardcoded set (kept for backwards compatibility).
     easy   — one gentle flavor per detectable issue.
     medium — one moderate flavor per detectable issue.
     hard   — one adversarial flavor per detectable issue.
@@ -39,7 +38,6 @@ from __future__ import annotations
 
 from src.corruption._common import (
     DEFAULT_CLEAN_PATH,
-    DEFAULT_DIRTY_PATH,
     DEFAULT_FULL_PATH,
 )
 from src.corruption.stages import corrupt_database
@@ -48,6 +46,5 @@ from src.corruption.stages import corrupt_database
 __all__ = [
     "corrupt_database",
     "DEFAULT_CLEAN_PATH",
-    "DEFAULT_DIRTY_PATH",
     "DEFAULT_FULL_PATH",
 ]
