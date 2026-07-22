@@ -8,6 +8,8 @@ def get_task(issue_key: str) -> IssueTask | None:
 from src.llm.tasks import (
     missing_object_type,
     incorrect_object_type,
+    incorrect_event_type,
+    incorrect_event_time,
     missing_attribute_value,
     missing_event_attribute_value,
     incorrect_attribute_datatype,
@@ -18,6 +20,8 @@ from src.llm.tasks import (
     dangling_e2o_relationship,
     duplicate_objects_on_ids,
     duplicate_objects_on_attributes,
+    duplicate_events_on_ids,
+    duplicate_events_on_attributes,
     missing_event,
     missing_event_type,
     missing_event_timestamp,

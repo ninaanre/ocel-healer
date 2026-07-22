@@ -57,6 +57,54 @@ def _candidates_incorrect_object_type(sqlite_path: str, chosen_type: str) -> lis
     ]
 
 
+def _candidates_incorrect_event_type(sqlite_path: str, chosen_type: str) -> list[dict]:
+    """One row per event of the chosen type. Direct event-side mirror of
+    :func:`_candidates_incorrect_object_type`."""
+    with _connect(sqlite_path) as conn:
+        ids = conn.execute(
+            "SELECT ocel_id FROM event "
+            "WHERE ocel_type = ? AND ocel_id IS NOT NULL "
+            "ORDER BY ocel_id",
+            (chosen_type,),
+        ).fetchall()
+    return [
+        {
+            "ocel_id": oid,
+            "ocel_type": chosen_type,
+            "event_type": chosen_type,
+            "issue": "incorrect_event_type",
+        }
+        for (oid,) in ids
+    ]
+
+
+def _candidates_incorrect_event_time(sqlite_path: str, chosen_type: str) -> list[dict]:
+    """One row per event of the chosen event type. Each row carries the
+    concrete ``target_table`` (the per-type ``event_<Map>`` sub-table where
+    ``ocel_time`` actually lives) and the current ``actual_value`` so the
+    downstream fix path can UPDATE the right row without re-resolving the
+    schema."""
+    with _connect(sqlite_path) as conn:
+        type_map = dict(_event_type_tables(conn))
+        table = type_map.get(chosen_type)
+        if not table:
+            return []
+        rows = conn.execute(
+            f'SELECT ocel_id, ocel_time FROM "{table}" '
+            f"WHERE ocel_id IS NOT NULL ORDER BY ocel_id"
+        ).fetchall()
+    return [
+        {
+            "ocel_id": oid,
+            "event_type": chosen_type,
+            "target_table": table,
+            "actual_value": ocel_time,
+            "issue": "incorrect_event_time",
+        }
+        for (oid, ocel_time) in rows
+    ]
+
+
 def _candidates_incorrect_attribute_value(sqlite_path: str, chosen_type: str) -> list[dict]:
     """One row per (object of chosen type, attribute) pair that already passes
     both rule detectors (non-null AND type-correct). This is the set of cells
@@ -127,6 +175,8 @@ def _candidates_missing_event_attribute(sqlite_path: str, chosen_type: str) -> l
 
 _SOURCES: dict[str, RowSource] = {
     "incorrect_object_type":            _candidates_incorrect_object_type,
+    "incorrect_event_type":             _candidates_incorrect_event_type,
+    "incorrect_event_time":             _candidates_incorrect_event_time,
     "incorrect_attribute_value":        _candidates_incorrect_attribute_value,
     "incorrect_event_attribute_value":  _candidates_incorrect_event_attribute_value,
     "missing_object_attribute":         _candidates_missing_object_attribute,
@@ -149,6 +199,8 @@ def candidate_noun(issue_key: str) -> str:
     Falls back to ``candidate`` for unregistered keys."""
     return {
         "incorrect_object_type":            "object",
+        "incorrect_event_type":             "event",
+        "incorrect_event_time":             "event time",
         "incorrect_attribute_value":        "attribute value",
         "incorrect_event_attribute_value":  "event attribute value",
         "missing_object_attribute":         "type schema",
@@ -162,6 +214,8 @@ def candidate_kind(issue_key: str) -> str:
     dashboard consults this when building the type picker so the user
     picks from event types when drilling into event-attribute issues."""
     return {
+        "incorrect_event_type":             "event",
+        "incorrect_event_time":             "event",
         "incorrect_event_attribute_value":  "event",
         "missing_event_attribute":          "event",
     }.get(issue_key, "object")
