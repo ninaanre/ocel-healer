@@ -32,6 +32,9 @@ RULE_DETECTORS = (
     "incorrect_attribute_datatype",
     "dangling_o2o_relationship",
     "dangling_e2o_relationship",
+    "duplicate_o2o_relations",
+    "o2o_self_loop",
+    "duplicate_e2o_relations",
 )
 # `missing_event_attribute_value` and `incorrect_event_attribute_datatype`
 # exist as rule detectors but aren't in RULE_DETECTORS: the corruption
@@ -51,10 +54,15 @@ CLEAN_BASELINE = {
     "missing_object":                    0,
     "duplicate_objects_on_ids":          0,
     "duplicate_objects_on_attributes":   384,
+    "duplicate_events_on_ids":           0,
+    "duplicate_events_on_attributes":    0,
     "incorrect_attribute_datatype":      0,
     "incorrect_event_attribute_datatype": 0,
     "dangling_o2o_relationship":         0,
     "dangling_e2o_relationship":         0,
+    "duplicate_o2o_relations":           0,
+    "o2o_self_loop":                     0,
+    "duplicate_e2o_relations":           0,
 }
 
 

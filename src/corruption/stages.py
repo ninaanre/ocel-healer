@@ -57,9 +57,18 @@ from src.corruption.relation_issues import (
     inject_dangling_o2o_relationship_missing_both_typo,
     inject_dangling_o2o_relationship_missing_source,
     inject_dangling_o2o_relationship_missing_target,
+    inject_duplicate_e2o_relations_item_medium,
+    inject_duplicate_e2o_relations_order_easy,
+    inject_duplicate_e2o_relations_sales_person_hard,
+    inject_duplicate_o2o_relations_comprises_easy,
+    inject_duplicate_o2o_relations_places_medium,
+    inject_duplicate_o2o_relations_sales_rep_hard,
     inject_missing_object_item_medium,
     inject_missing_object_order_easy,
     inject_missing_object_product_hard,
+    inject_o2o_self_loop_employee_medium,
+    inject_o2o_self_loop_order_easy,
+    inject_o2o_self_loop_product_hard,
 )
 
 
@@ -106,6 +115,10 @@ def _stage_easy(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_null_confirm_easy(conn)
     # Relation-borne missing object
     inject_missing_object_order_easy(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_comprises_easy(conn)
+    inject_o2o_self_loop_order_easy(conn)
+    inject_duplicate_e2o_relations_order_easy(conn)
 
 
 def _stage_medium(conn: sqlite3.Connection) -> None:
@@ -124,6 +137,10 @@ def _stage_medium(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_empty_pay_medium(conn)
     # Relation-borne missing object
     inject_missing_object_item_medium(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_places_medium(conn)
+    inject_o2o_self_loop_employee_medium(conn)
+    inject_duplicate_e2o_relations_item_medium(conn)
 
 
 def _stage_hard(conn: sqlite3.Connection) -> None:
@@ -142,6 +159,10 @@ def _stage_hard(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_whitespace_package_hard(conn)
     # Relation-borne missing object
     inject_missing_object_product_hard(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_sales_rep_hard(conn)
+    inject_o2o_self_loop_product_hard(conn)
+    inject_duplicate_e2o_relations_sales_person_hard(conn)
 
 
 _LEVEL_STAGES: dict[str, list[Callable[[sqlite3.Connection], None]]] = {
