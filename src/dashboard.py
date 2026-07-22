@@ -10,12 +10,16 @@ def imports():
     from pathlib import Path
     from src.detection.error_detection import (
         _connect as connect_sqlite,
+        _event_type_tables as event_type_tables,
         _object_type_tables as object_type_tables,
         detect_all,
     )
     from src.llm import (
         MODEL,
         apply_repair,
+        candidate_kind,
+        candidate_noun,
+        candidate_rows,
         detect_all_with_llm,
         llm_ready,
         suggest_repair,
@@ -31,10 +35,14 @@ def imports():
         DATA_DIR,
         MODEL,
         apply_repair,
+        candidate_kind,
+        candidate_noun,
+        candidate_rows,
         connect_sqlite,
         detect_all,
         detect_all_with_llm,
         dr,
+        event_type_tables,
         explore_database,
         guide_is_stale,
         load_guide,
@@ -62,6 +70,7 @@ def issue_labels():
         "missing_event":                     "Missing Event",
         "missing_event_type":                "Missing Event Type",
         "missing_event_timestamp":           "Missing Event Time",
+        "missing_event_attribute_value":     "Missing Evt. Attr. Value",
         "missing_object":                    "Missing Object",
         "missing_object_type":               "Missing Object Type",
         "missing_attribute_value":           "Missing Obj. Attr. Value",
@@ -70,7 +79,10 @@ def issue_labels():
         "duplicate_objects_on_ids":          "Incorrect Object (by ID)",
         "duplicate_objects_on_attributes":   "Incorrect Object (by attributes)",
         "incorrect_object_type":             "Incorrect Object Type",
-        "incorrect_attribute_datatype":      "Incorrect Obj. Attr. Value",
+        "incorrect_attribute_datatype":      "Incorrect Obj. Attr. Type",
+        "incorrect_attribute_value":         "Incorrect Obj. Attr. Value",
+        "incorrect_event_attribute_datatype": "Incorrect Evt. Attr. Type",
+        "incorrect_event_attribute_value":    "Incorrect Evt. Attr. Value",
     }
     # Synthetic sentinel for the merged N6 cell (paper §4.2), which spans
     # both duplicate detectors under a single "Incorrect Object" heading.
@@ -382,6 +394,30 @@ def expert_state(mo):
 
 
 @app.cell
+def flag_key_helper():
+    """Derive the flag-dict key for a proposal row.
+
+    The flag dict is keyed by ``(sqlite_path, issue_key, ocel_id, extra)``
+    where ``extra`` disambiguates multiple flags on the same object under
+    the same issue — e.g. two different attributes of the same object each
+    flagged as ``incorrect_attribute_value``. For object-level issues
+    (``incorrect_object_type``) ``extra`` is the empty string.
+
+    A helper (rather than an inline tuple) keeps every producer / consumer
+    in lock-step; adding a new LLM detector only requires teaching this
+    function what its distinguisher is.
+    """
+
+    def flag_key(sqlite_path: str, issue_key: str, row: dict) -> tuple:
+        _extra = ""
+        if issue_key in ("incorrect_attribute_value", "incorrect_event_attribute_value"):
+            _extra = str(row.get("attribute") or row.get("attribute_name") or "")
+        return (sqlite_path, issue_key, str(row.get("ocel_id") or ""), _extra)
+
+    return (flag_key,)
+
+
+@app.cell
 def sweep_result_state(mo):
     # Persistent per-sweep results, keyed by (sqlite_path, issue_key,
     # ocel_type). Value shape:
@@ -427,13 +463,17 @@ def overview_config():
     # type) vs data-level (`… Attribute Value`: the cell value on a given
     # row) — the repo's detectors and resolvers today all operate on
     # values, not schema, so keeping them separate makes the mapping
-    # honest. Columns without a detector yet — `Event Attribute`,
-    # `Object Attribute`, `Event Attribute Value` — are included as
-    # placeholders and render as dashes. The paper's `Position` column
-    # is omitted per user preference (never populated).
+    # honest. Each `… Attribute Value` column is further split into
+    # `… Attr. Type` (rule-based SQLite affinity check) and
+    # `… Attr. Value` (LLM-based semantic-plausibility check) so the two
+    # detection mechanisms have their own cells; this applies symmetrically
+    # to Events and Objects. Columns without a detector yet — the
+    # schema-level `Evt. Attr.` and `Obj. Attr.` placeholders — render as
+    # dashes. The paper's `Position` column is omitted per user preference
+    # (never populated).
     col_groups = [
-        ("Events",    ["Event", "Event Type", "Event Time", "Evt. Attr.", "Evt. Attr. Value"]),
-        ("Objects",   ["Object", "Object Type", "Obj. Attr.", "Obj. Attr. Value"]),
+        ("Events",    ["Event", "Event Type", "Event Time", "Evt. Attr.", "Evt. Attr. Type", "Evt. Attr. Value"]),
+        ("Objects",   ["Object", "Object Type", "Obj. Attr.", "Obj. Attr. Type", "Obj. Attr. Value"]),
         ("Relations", ["Object-to-Object", "Event-to-Object"]),
     ]
     cols_flat = [c for _, cs in col_groups for c in cs]
@@ -444,13 +484,17 @@ def overview_config():
         ("Missing Data",   "Event"):            ["missing_event"],               # I2
         ("Missing Data",   "Event Type"):       ["missing_event_type"],          # I6
         ("Missing Data",   "Event Time"):       ["missing_event_timestamp"],     # I7
-        # ("Missing Data", "Event Attribute"):  I9  — no detector yet
-        # ("Missing Data", "Position"):         I5  — no detector yet
+        ("Missing Data",   "Evt. Attr. Value"): ["missing_event_attribute_value"], # I9 (value)
+        # ("Missing Data", "Evt. Attr."):       I9-schema — no detector yet
+        # ("Missing Data", "Position"):         I5     — no detector yet
 
         # Objects row
         ("Missing Data",   "Object"):                 ["missing_object"],              # N1
         ("Missing Data",   "Object Type"):            ["missing_object_type"],         # N2
         ("Missing Data",   "Obj. Attr. Value"):       ["missing_attribute_value"],     # N3
+        # ("Missing Data", "Obj. Attr. Type"):        N3-schema — no detector yet
+        #   (a missing value can't be datatype-wrong; missingness lives under
+        #   Obj. Attr. Value alongside the LLM value check.)
 
         # Relations row
         ("Missing Data",   "Object-to-Object"): ["dangling_o2o_relationship"],   # N4
@@ -462,9 +506,16 @@ def overview_config():
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
         ("Incorrect Data", "Object Type"):            ["incorrect_object_type"],       # N7
-        ("Incorrect Data", "Obj. Attr. Value"):       ["incorrect_attribute_datatype"],# N8
+        ("Incorrect Data", "Obj. Attr. Type"):        ["incorrect_attribute_datatype"],# N8a (rule)
+        ("Incorrect Data", "Obj. Attr. Value"):       ["incorrect_attribute_value"],   # N8b (LLM)
+        ("Incorrect Data", "Evt. Attr. Type"):        ["incorrect_event_attribute_datatype"], # I8a (rule)
+        ("Incorrect Data", "Evt. Attr. Value"):       ["incorrect_event_attribute_value"],    # I8b (LLM)
     }
-    llm_detected_keys = {"incorrect_object_type"}
+    llm_detected_keys = {
+        "incorrect_object_type",
+        "incorrect_attribute_value",
+        "incorrect_event_attribute_value",
+    }
     return col_groups, cols_flat, llm_detected_keys, mapping, rows
 
 
@@ -828,7 +879,9 @@ def drill_router(
 
 @app.cell
 def drill_llm_controls(
+    candidate_kind,
     ctx,
+    event_type_tables,
     get_picked_type,
     object_type_tables,
     connect_sqlite,
@@ -838,23 +891,33 @@ def drill_llm_controls(
     set_picked_type,
     sqlite_path,
 ):
-    """Object-type picker + Run button. Available in ``llm_pending`` AND
+    """Type picker + Run button. Available in ``llm_pending`` AND
     ``llm_with_flags`` — the mode transitions to ``llm_with_flags`` after
     the first Confirm, but the user may still want to run sweeps on other
-    object types.
+    types.
+
+    The picker scopes the LLM sweep. Object-side issues (e.g.
+    ``incorrect_object_type``, ``incorrect_attribute_value``) pick from
+    object types; event-side issues (``incorrect_event_attribute_value``)
+    pick from event types. The distinction comes from
+    ``src.llm.candidate_sources.candidate_kind`` so a new detector only
+    has to register its kind, not touch this cell.
 
     The type picker's value is mirrored in `get_picked_type`/`set_picked_type`
     so mode transitions (which cause this cell to re-run and rebuild the
     widget) don't wipe the user's pick. Picking a different type also
     clears the sweep banner via `set_banner_key(None)`."""
+    _kind = candidate_kind(ctx["issue_key"]) if ctx["issue_key"] else "object"
+    _label = "Event type" if _kind == "event" else "Object type"
     if ctx["mode"] not in ("llm_pending", "llm_with_flags"):
         # Widgets must still exist so downstream cells can read them, but
         # they don't need to be usable.
-        type_picker = mo.ui.dropdown(options=[], label="Object type")
+        type_picker = mo.ui.dropdown(options=[], label=_label)
         detect_btn = mo.ui.run_button(label="Run detection", disabled=True)
     else:
         with connect_sqlite(sqlite_path) as _conn:
-            _types = [t for t, _ in object_type_tables(_conn)]
+            _lookup = event_type_tables if _kind == "event" else object_type_tables
+            _types = [t for t, _ in _lookup(_conn)]
         _persisted_type = get_picked_type()
         _initial_type = _persisted_type if _persisted_type in _types else None
 
@@ -864,13 +927,13 @@ def drill_llm_controls(
 
         type_picker = mo.ui.dropdown(
             options=_types,
-            label="Object type",
+            label=_label,
             searchable=True,
             value=_initial_type,
             on_change=_on_type_change,
         )
         detect_btn = mo.ui.run_button(
-            label="Run detection on selected type",
+            label=f"Run detection on selected {_label.lower()}",
             disabled=not llm_enabled or not _types,
         )
     return detect_btn, type_picker
@@ -925,17 +988,18 @@ def drill_shell_top(
 
 @app.cell
 def drill_llm_sweep(
-    connect_sqlite,
+    candidate_noun,
+    candidate_rows,
     ctx,
     detect_all_with_llm,
     detect_btn,
     get_sweep_ordinal,
-    get_sweep_ran,
     get_sweep_result,
     mo,
     set_banner_key,
     set_sweep_ordinal,
     set_sweep_ran,
+    get_sweep_ran,
     set_sweep_result,
     sqlite_path,
     type_picker,
@@ -944,6 +1008,13 @@ def drill_llm_sweep(
     entry into ``get_sweep_result`` keyed by (path, issue_key, type) so
     the panel below can render it on subsequent reactive cycles — after
     ``detect_btn.value`` has flipped back to falsy.
+
+    Candidate rows are sourced per issue_key via
+    ``src.llm.candidate_sources.candidate_rows`` — some tasks judge one row
+    per object of the chosen type, others judge one row per (object,
+    attribute) pair. The sweep code itself is uniform across shapes; the
+    per-key differences live in the row source and the ``candidate_noun``
+    used in the progress bar.
 
     The progress bar is opened here so its live output slot renders in
     this cell's position. Cell source order is arranged so this slot
@@ -957,22 +1028,13 @@ def drill_llm_sweep(
         and _issue_key is not None
     ):
         chosen_type = type_picker.value
-        with connect_sqlite(sqlite_path) as _conn:
-            _ids = _conn.execute(
-                "SELECT ocel_id FROM object "
-                "WHERE ocel_type = ? AND ocel_id IS NOT NULL "
-                "ORDER BY ocel_id",
-                (chosen_type,),
-            ).fetchall()
-        candidates = [
-            {"ocel_id": _oid, "ocel_type": chosen_type, "issue": _issue_key}
-            for (_oid,) in _ids
-        ]
+        candidates = candidate_rows(_issue_key, sqlite_path, chosen_type)
         total = len(candidates)
+        _noun = candidate_noun(_issue_key)
 
         _proposals: list = []
         if total == 0:
-            _summary_text = f"No objects found for type `{chosen_type}`."
+            _summary_text = f"No {_noun}s found for type `{chosen_type}`."
             _verdict_count = 0
         else:
             flagged_count = [0]
@@ -987,7 +1049,7 @@ def drill_llm_sweep(
 
             with mo.status.progress_bar(
                 total=total,
-                title=f"Judging {total} `{chosen_type}` object(s)…",
+                title=f"Judging {total} `{chosen_type}` {_noun}(s)…",
                 subtitle=f"0/{total} judged · 0 flagged so far",
             ) as _bar:
                 verdicts = detect_all_with_llm(
@@ -1001,7 +1063,7 @@ def drill_llm_sweep(
                     _proposals.append({"row": dict(_row), "verdict": _verdict})
             _verdict_count = len(verdicts)
             _summary_text = (
-                f"Judged **{_verdict_count}** `{chosen_type}` object(s) → "
+                f"Judged **{_verdict_count}** `{chosen_type}` {_noun}(s) → "
                 f"**{len(_proposals)}** proposed flag(s)."
             )
 
@@ -1097,6 +1159,7 @@ def drill_llm_confirm_buttons(mo, proposals_all):
 def drill_llm_confirm_render(
     agree_array,
     ctx,
+    flag_key,
     get_banner_key,
     get_flags,
     get_sweep_result,
@@ -1123,6 +1186,21 @@ def drill_llm_confirm_render(
         _issue_key = ctx["issue_key"]
         _banner_key = get_banner_key()
 
+        def _current_and_context(row):
+            """(current_value, context_prefix) shown on the proposal card.
+
+            ``incorrect_object_type`` proposes replacing the object's type;
+            ``incorrect_attribute_value`` / ``incorrect_event_attribute_value``
+            propose replacing one attribute value. The right side of the
+            card is always the LLM's suggested_value; the left side depends
+            on what's being replaced. ``context_prefix`` is a short badge
+            (empty for object type; ``attr=X`` for attribute values) so a
+            page of cards for different attributes stays readable.
+            """
+            if _issue_key in ("incorrect_attribute_value", "incorrect_event_attribute_value"):
+                return row.get("actual_value"), f"<b>Attribute:</b> <code>{row.get('attribute')}</code>"
+            return row.get("ocel_type"), ""
+
         # Group proposals by ocel_type so each type's cards render under
         # its own summary line.
         _by_type: dict[str, list[tuple[int, dict]]] = {}
@@ -1141,17 +1219,25 @@ def drill_llm_confirm_render(
                 _row = _prop["row"]
                 _v = _prop["verdict"]
                 _ocel_id = _row["ocel_id"]
-                if (sqlite_path, _ocel_id) in current_flags:
+                _flag_key = flag_key(sqlite_path, _issue_key, _row)
+                if _flag_key in current_flags:
                     continue   # confirmed → removed entirely
-                if _ocel_id in _dismissed:
+                _dismiss_key = _flag_key[2:]  # (ocel_id, extra) — see reject_observer
+                if _ocel_id in _dismissed or _dismiss_key in _dismissed:
                     continue   # dismissed → hidden
                 _bar_pct = int(round(_v.confidence * 100))
+                _current, _context_prefix = _current_and_context(_row)
+                _context_line = (
+                    f"<div style='margin-bottom:4px'>{_context_prefix}</div>"
+                    if _context_prefix else ""
+                )
                 _header = mo.Html(
                     "<div style='font-family:system-ui; padding:6px 0;'>"
                     f"<div><b>ocel_id:</b> <code>{_ocel_id}</code></div>"
+                    f"{_context_line}"
                     f"<div style='margin:4px 0'>"
                     f"<b>Current:</b> <span style='background:#fde2e2; color:#b00020; "
-                    f"padding:1px 6px; border-radius:3px;'>{_row.get('ocel_type')}</span>"
+                    f"padding:1px 6px; border-radius:3px;'>{_current}</span>"
                     f" &nbsp;→&nbsp; "
                     f"<b>Suggested:</b> <span style='background:#e6ffec; color:#1a7f37; "
                     f"padding:1px 6px; border-radius:3px;'>{_v.suggested_value}</span>"
@@ -1175,14 +1261,14 @@ def drill_llm_confirm_render(
         llm_view = mo.vstack(_parts, gap=0.5)
     elif ctx["mode"] == "llm_pending":
         llm_view = mo.md(
-            "_Pick an object type and click **Run detection** to start a sweep._"
+            "_Pick a type and click **Run detection** to start a sweep._"
         )
     return (llm_view,)
 
 
 @app.cell
 def drill_llm_agree_observer(
-    agree_array, ctx, get_flags, proposals_all, set_banner_key, set_flags, sqlite_path,
+    agree_array, ctx, flag_key, get_flags, proposals_all, set_banner_key, set_flags, sqlite_path,
 ):
     """When a Confirm button is clicked, add the proposal to get_flags()."""
     if (
@@ -1192,15 +1278,19 @@ def drill_llm_agree_observer(
     ):
         current = dict(get_flags())
         changed = False
+        _issue_key = ctx["issue_key"]
         for _i, _prop in enumerate(proposals_all):
             _row = _prop["row"]
             _v = _prop["verdict"]
-            _key = (sqlite_path, _row["ocel_id"])
+            _key = flag_key(sqlite_path, _issue_key, _row)
             if agree_array[_i].value and _key not in current:
+                # Preserve every field on the detector row (ocel_type,
+                # attribute, actual_value, expected_type, …) so the fix
+                # path can build the right target from an LLM flag the
+                # same way it would from a rule-detector row.
                 current[_key] = {
-                    "ocel_id": _row["ocel_id"],
-                    "ocel_type": _row.get("ocel_type"),
-                    "issue": ctx["issue_key"],
+                    **_row,
+                    "issue": _issue_key,
                     "_detected_suggestion": _v.suggested_value,
                     "_detected_rationale": _v.rationale,
                     "_detected_confidence": _v.confidence,
@@ -1215,6 +1305,7 @@ def drill_llm_agree_observer(
 @app.cell
 def drill_llm_reject_observer(
     ctx,
+    flag_key,
     get_sweep_result,
     proposals_all,
     reject_array,
@@ -1222,10 +1313,15 @@ def drill_llm_reject_observer(
     set_sweep_result,
     sqlite_path,
 ):
-    """When a Dismiss button is clicked, add the proposal's ocel_id to
-    the sweep entry's ``dismissed`` set so it stays hidden across
+    """When a Dismiss button is clicked, add the proposal's dismissal key
+    to the sweep entry's ``dismissed`` set so it stays hidden across
     subsequent reactive cycles (``reject_array[i].value`` is ephemeral
-    and unusable as a source of truth on its own)."""
+    and unusable as a source of truth on its own).
+
+    The dismissal key is ``flag_key`` minus its (path, issue) prefix —
+    i.e. ``(ocel_id, extra)`` — so an object with multiple
+    ``incorrect_attribute_value`` proposals can dismiss them
+    independently."""
     if (
         ctx["mode"] in ("llm_pending", "llm_with_flags")
         and proposals_all
@@ -1237,16 +1333,17 @@ def drill_llm_reject_observer(
         for _i, _prop in enumerate(proposals_all):
             if not reject_array[_i].value:
                 continue
-            _ocel_id = _prop["row"]["ocel_id"]
+            _row = _prop["row"]
             _t = _prop["ocel_type"]
-            _key = (sqlite_path, _issue_key, _t)
-            _entry = _all.get(_key)
+            _dismiss_key = flag_key(sqlite_path, _issue_key, _row)[2:]
+            _sweep_key = (sqlite_path, _issue_key, _t)
+            _entry = _all.get(_sweep_key)
             if _entry is None:
                 continue
-            if _ocel_id in _entry["dismissed"]:
+            if _dismiss_key in _entry["dismissed"]:
                 continue
-            _new_dismissed = set(_entry["dismissed"]) | {_ocel_id}
-            _all[_key] = {**_entry, "dismissed": _new_dismissed}
+            _new_dismissed = set(_entry["dismissed"]) | {_dismiss_key}
+            _all[_sweep_key] = {**_entry, "dismissed": _new_dismissed}
             _changed = True
         if _changed:
             set_sweep_result(_all)
@@ -1269,8 +1366,13 @@ def drill_rule_source(ctx, get_flags, results, sqlite_path):
                 source_rows.append((_k, dict(_row)))
     elif ctx["mode"] == "llm_with_flags":
         _issue = ctx["issue_key"]
-        for (_path, _oid), _entry in get_flags().items():
-            if _path == sqlite_path and _entry.get("issue") == _issue:
+        # Flag keys are (sqlite_path, issue_key, ocel_id, extra) — the
+        # first two suffice to filter this drill-in's flags. Field-level
+        # filtering (issue) is still done on the entry as a belt-and-braces
+        # guard against pre-existing state produced under the old
+        # (path, ocel_id) key shape.
+        for _k, _entry in get_flags().items():
+            if _k[0] == sqlite_path and _k[1] == _issue and _entry.get("issue") == _issue:
                 source_rows.append((_issue, dict(_entry)))
     return (source_rows,)
 
@@ -1560,6 +1662,7 @@ def drill_fix_apply(
     ctx,
     dry_run_toggle,
     fix_rows,
+    flag_key,
     get_flags,
     get_repair_tick,
     mo,
@@ -1585,7 +1688,7 @@ def drill_fix_apply(
         if _oid is None:
             return
         _current = dict(get_flags())
-        _key = (sqlite_path, _oid)
+        _key = flag_key(sqlite_path, ctx["issue_key"], _row)
         if _key in _current:
             del _current[_key]
             set_flags(_current)

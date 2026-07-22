@@ -54,14 +54,21 @@ def sample_peers(
     k: int = 5,
     seed: int = 0,
     target_col: str | None = None,
+    kind: str = "object",
 ) -> list[dict[str, Any]]:
-    """Return up to `k` peer rows from the anchor's object-type table.
+    """Return up to `k` peer rows from the anchor's per-type table.
 
     When `target_col` is given, stratify so at least half of the returned
     peers have a non-null value in that column. Excludes the anchor itself
     and (when present) delta-change rows (`ocel_changed_field IS NULL`).
+
+    ``kind`` selects which per-type table to sample from:
+    ``"object"`` (default) uses ``object_<type>`` tables; ``"event"`` uses
+    ``event_<map>`` tables. The ``ocel_changed_field`` filter fires only
+    when the table has that column — events don't, so the same helper
+    works for both without extra branching.
     """
-    table = table_for_type(conn, anchor_type)
+    table = table_for_type(conn, anchor_type, kind=kind)
     if not table:
         return []
 

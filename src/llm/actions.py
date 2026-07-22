@@ -86,6 +86,46 @@ def object_attribute_target(row: dict) -> dict | None:
     }
 
 
+def event_attribute_target(row: dict, *, sqlite_path: str | None = None) -> dict | None:
+    """Target builder for repairing an event-attribute cell.
+
+    Mirrors :func:`object_attribute_target`. Per-type event tables are
+    named ``event_<ocel_type_map>`` where the ``ocel_type_map`` suffix
+    comes from ``event_map_type`` and may differ from the paper-label
+    ``event_type`` (e.g. type `"Create Order"` maps to
+    ``event_CreateOrder``). When ``sqlite_path`` is supplied, this
+    function resolves the map; otherwise it falls back to the raw event
+    type as the suffix and relies on ``apply_repair``'s tolerant table
+    resolver (see :func:`_resolve_table`) to case-match.
+    """
+    event_type = row.get("event_type")
+    attr_col = row.get("attribute_name") or row.get("attribute")
+    anchor_id = row.get("ocel_id") or row.get("ocel_event_id")
+    if not (event_type and attr_col and anchor_id):
+        return None
+    old = row["actual_value"] if "actual_value" in row else None
+    table = f"event_{event_type}"
+    if sqlite_path:
+        try:
+            with _connect(sqlite_path) as _conn:
+                row_map = _conn.execute(
+                    "SELECT ocel_type_map FROM event_map_type WHERE ocel_type = ? LIMIT 1",
+                    (event_type,),
+                ).fetchone()
+                if row_map and row_map[0]:
+                    table = f"event_{row_map[0]}"
+        except sqlite3.Error:
+            # Fall through to the raw suffix — apply_repair's resolver may
+            # still case-match it against the schema.
+            pass
+    return {
+        "target_table": table,
+        "target_pk": {"ocel_id": anchor_id},
+        "column": attr_col,
+        "old_value": old,
+    }
+
+
 def relation_swap_target(row: dict, *, table: str, sides: dict[str, dict]) -> dict | None:
     """`sides` maps each missing_side value to {"column": <write>, "pk": [...]}."""
     spec = sides.get(row.get("missing_side"))
@@ -106,7 +146,7 @@ def relation_swap_target(row: dict, *, table: str, sides: dict[str, dict]) -> di
 _PROPOSED_KEYS = (
     "coerced_value", "inferred_value", "inferred_type",
     "inferred_referent", "canonical_id", "canonical_value",
-    "inferred_timestamp", "ocel_type",
+    "inferred_timestamp", "ocel_type", "suggested_value",
 )
 
 _EMPTY_TARGET = {"target_table": "", "target_pk": {}, "column": None, "old_value": None}

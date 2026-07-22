@@ -68,6 +68,13 @@ class IssueTask(ABC):
     # One of "type", "attribute", "relation", "duplicate", "temporal".
     family: ClassVar[str] = ""
 
+    # Which side of the OCEL log this task's anchor lives on: ``"object"``
+    # (the default — every legacy task) or ``"event"``. Controls which
+    # per-type table :meth:`_attach_anchor` and :meth:`_attach_peers` read,
+    # and whether :meth:`_attach_events` fires at all (event anchors have
+    # no "events touching them" — they ARE the event).
+    kind: ClassVar[str] = "object"
+
     # Pydantic model the LLM's reply is validated against.
     OutputModel: ClassVar[type[BaseModel] | None] = None
 
@@ -129,7 +136,10 @@ class IssueTask(ABC):
         anchor_id, anchor_type = self.anchor(row)
         if anchor_id:
             self._attach_anchor(conn, ctx, anchor_id, anchor_type)
-            self._attach_events(conn, ctx, anchor_id)
+            # Only object anchors have "events touching them". For event
+            # anchors the concept is meaningless (the anchor is the event).
+            if self.kind == "object":
+                self._attach_events(conn, ctx, anchor_id)
         # Hints go in before extend_context so task-specific context can use them.
         if use_hints:
             self._attach_exploration_hints(conn, ctx, row)
@@ -210,7 +220,7 @@ class IssueTask(ABC):
         anchor_type: str | None,
     ) -> None:
         attrs: dict[str, Any] = {}
-        table = table_for_type(conn, anchor_type)
+        table = table_for_type(conn, anchor_type, kind=self.kind)
         if table:
             cols = [c for c, _ in _column_info(conn, table)]
             if cols:
@@ -221,7 +231,12 @@ class IssueTask(ABC):
                 ).fetchone()
                 if row_data:
                     attrs = dict(zip(cols, row_data))
-        ctx["object"] = {"ocel_id": anchor_id, "ocel_type": anchor_type, "attributes": attrs}
+        # Slot name is ``object`` for object anchors, ``event`` for event
+        # anchors — every legacy task reads ``ctx["object"]`` so switching
+        # by kind keeps the object side untouched while giving event tasks
+        # their own slot.
+        slot = "event" if self.kind == "event" else "object"
+        ctx[slot] = {"ocel_id": anchor_id, "ocel_type": anchor_type, "attributes": attrs}
 
     def _attach_events(self, conn: sqlite3.Connection, ctx: dict, anchor_id: str) -> None:
         ctx["events"] = [
@@ -242,11 +257,16 @@ class IssueTask(ABC):
         *,
         target_col: str | None = None,
     ) -> None:
-        """Attach `peer_objects`: up to 5 peers of the same type, full attribute rows.
+        """Attach ``peer_objects``: up to 5 peers of the same type, full attribute rows.
 
-        Delegates to `sampling.sample_peers` for deterministic + representative
-        selection. When `target_col` is given, stratifies so at least half the
-        peers have a non-null value in that column.
+        Delegates to :func:`sampling.sample_peers` for deterministic +
+        representative selection. When ``target_col`` is given, stratifies so
+        at least half the peers have a non-null value in that column. The
+        peers come from the object-type table for object tasks and from
+        the event-type table for event tasks (via ``self.kind``); the ctx
+        slot is always ``peer_objects`` — event tasks reuse the same slot
+        rather than introducing a parallel ``peer_events`` so downstream
+        prompt / rendering machinery stays uniform.
         """
         anchor_id, anchor_type = self.anchor(row)
         if not anchor_id:
@@ -258,6 +278,7 @@ class IssueTask(ABC):
             anchor_type=anchor_type,
             k=5,
             target_col=target_col,
+            kind=self.kind,
         )
         if peers:
             ctx["peer_objects"] = peers

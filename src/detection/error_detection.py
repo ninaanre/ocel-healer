@@ -8,7 +8,10 @@ import polars as pl
 SqliteInput = str | sqlite3.Connection
 
 # OCEL2 reserved columns that aren't user-defined attributes.
-_OCEL_RESERVED = {"ocel_id", "ocel:timestamp", "ocel_type", "ocel_time", "ocel_changed_field", "new_value"}
+_OCEL_RESERVED = {
+    "ocel_id", "ocel:timestamp", "ocel:activity",
+    "ocel_type", "ocel_time", "ocel_changed_field", "new_value",
+}
 
 def _frame(rows: list[dict], columns: list[str]) -> pl.DataFrame:
     """Build a Utf8-typed DataFrame, enforcing column order even when empty."""
@@ -111,6 +114,29 @@ def _iter_object_attrs(
                 yield ocel_type, ocel_id, attr, declared, value
 
 
+def _iter_event_attrs(
+    conn: sqlite3.Connection,
+) -> Iterator[tuple[str, object, str, str, object]]:
+    """Yield (event_type, ocel_id, attr_name, declared_type, value) for every
+    non-reserved attribute cell across all per-type event tables.
+
+    Mirror of `_iter_object_attrs` for the event side. Events don't use the
+    ``ocel_changed_field`` delta-row pattern (they're static rows), so there
+    is no ``initial_rows_only`` toggle.
+    """
+    for ocel_type, table in _event_type_tables(conn):
+        cols = _column_info(conn, table)
+        if not cols:
+            continue
+        attr_names = [c for c, _ in cols]
+        quoted = ", ".join(f'"{c}"' for c in attr_names)
+        for ocel_id, *values in conn.execute(
+            f'SELECT ocel_id, {quoted} FROM "{table}"'
+        ).fetchall():
+            for (attr, declared), value in zip(cols, values):
+                yield ocel_type, ocel_id, attr, declared, value
+
+
 def detect_missing_attribute_value(src: SqliteInput) -> pl.DataFrame:
     """Find object rows where any attribute value is NULL or empty/whitespace."""
     with _connect(src) as conn:
@@ -156,6 +182,122 @@ def detect_incorrect_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
             "expected_type", "actual_value", "actual_python_type", "issue",
         ],
     )
+
+
+def iter_type_correct_attr_values(
+    src: SqliteInput,
+    *,
+    object_type: str | None = None,
+) -> list[dict]:
+    """Candidate rows for the LLM ``incorrect_attribute_value`` sweep.
+
+    Yields one row per (object, attribute) pair where the value is neither
+    missing nor a datatype mismatch — i.e. everything the two rule
+    detectors above would leave alone. The LLM's job on these rows is to
+    decide whether the (type-correct, non-null) value is semantically
+    plausible for its attribute.
+
+    `object_type` narrows to a single per-type table; the dashboard's
+    LLM sweep is scoped by the object-type dropdown.
+    """
+    out: list[dict] = []
+    with _connect(src) as conn:
+        for otype, oid, attr, declared, value in _iter_object_attrs(conn):
+            if object_type is not None and otype != object_type:
+                continue
+            if _is_missing(value) or not _value_matches_type(value, declared):
+                continue
+            out.append({
+                "object_type":  otype,
+                "ocel_id":      oid,
+                "attribute":    attr,
+                "expected_type": declared,
+                "actual_value": value,
+                "issue":        "incorrect_attribute_value",
+            })
+    return out
+
+
+def detect_missing_event_attribute_value(src: SqliteInput) -> pl.DataFrame:
+    """Find event rows where any attribute value is NULL or empty/whitespace.
+
+    Mirror of :func:`detect_missing_attribute_value` for the event side.
+    """
+    with _connect(src) as conn:
+        rows = [
+            {
+                "event_type": ocel_type,
+                "ocel_id": ocel_id,
+                "attribute": attr,
+                "actual_value": value,
+                "issue": "missing_event_attribute_value",
+            }
+            for ocel_type, ocel_id, attr, _, value in _iter_event_attrs(conn)
+            if _is_missing(value)
+        ]
+    return _frame(
+        rows, ["event_type", "ocel_id", "attribute", "actual_value", "issue"]
+    )
+
+
+def detect_incorrect_event_attribute_datatype(src: SqliteInput) -> pl.DataFrame:
+    """Find event attribute values that don't match the column's declared SQLite type.
+
+    Mirror of :func:`detect_incorrect_attribute_datatype` for the event side.
+    NULL/empty values are skipped (covered by
+    :func:`detect_missing_event_attribute_value`).
+    """
+    with _connect(src) as conn:
+        rows = [
+            {
+                "event_type": ocel_type,
+                "ocel_id": ocel_id,
+                "attribute": attr,
+                "expected_type": declared,
+                "actual_value": repr(value),
+                "actual_python_type": type(value).__name__,
+                "issue": "incorrect_event_attribute_datatype",
+            }
+            for ocel_type, ocel_id, attr, declared, value in _iter_event_attrs(conn)
+            if not _is_missing(value) and not _value_matches_type(value, declared)
+        ]
+    return _frame(
+        rows,
+        [
+            "event_type", "ocel_id", "attribute",
+            "expected_type", "actual_value", "actual_python_type", "issue",
+        ],
+    )
+
+
+def iter_type_correct_event_attr_values(
+    src: SqliteInput,
+    *,
+    event_type: str | None = None,
+) -> list[dict]:
+    """Candidate rows for the LLM ``incorrect_event_attribute_value`` sweep.
+
+    Yields one row per (event, attribute) pair that passes both rule
+    detectors on the event side — non-null AND type-correct. Mirror of
+    :func:`iter_type_correct_attr_values`. ``event_type`` narrows to a
+    single per-type event table, mirroring the object case.
+    """
+    out: list[dict] = []
+    with _connect(src) as conn:
+        for etype, oid, attr, declared, value in _iter_event_attrs(conn):
+            if event_type is not None and etype != event_type:
+                continue
+            if _is_missing(value) or not _value_matches_type(value, declared):
+                continue
+            out.append({
+                "event_type":   etype,
+                "ocel_id":      oid,
+                "attribute":    attr,
+                "expected_type": declared,
+                "actual_value": value,
+                "issue":        "incorrect_event_attribute_value",
+            })
+    return out
 
 
 def detect_dangling_o2o_relationship(src: SqliteInput) -> pl.DataFrame:
@@ -503,15 +645,17 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
 def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
     """Run all detectors and return their results keyed by check name."""
     return {
-        "missing_object_type":              detect_missing_object_type(src),
-        "missing_attribute_value":          detect_missing_attribute_value(src),
-        "duplicate_objects_on_ids":         detect_duplicate_objects_on_ids(src),
-        "duplicate_objects_on_attributes":  detect_duplicate_objects_on_attributes(src),
-        "incorrect_attribute_datatype":     detect_incorrect_attribute_datatype(src),
-        "dangling_o2o_relationship":        detect_dangling_o2o_relationship(src),
-        "dangling_e2o_relationship":        detect_dangling_e2o_relationship(src),
-        "missing_event_timestamp":          detect_missing_event_timestamp(src),
-        "missing_event":                    detect_missing_event(src),
-        "missing_event_type":               detect_missing_event_type(src),
-        "missing_object":                   detect_missing_object(src),
+        "missing_object_type":                  detect_missing_object_type(src),
+        "missing_attribute_value":              detect_missing_attribute_value(src),
+        "missing_event_attribute_value":        detect_missing_event_attribute_value(src),
+        "duplicate_objects_on_ids":             detect_duplicate_objects_on_ids(src),
+        "duplicate_objects_on_attributes":      detect_duplicate_objects_on_attributes(src),
+        "incorrect_attribute_datatype":         detect_incorrect_attribute_datatype(src),
+        "incorrect_event_attribute_datatype":   detect_incorrect_event_attribute_datatype(src),
+        "dangling_o2o_relationship":            detect_dangling_o2o_relationship(src),
+        "dangling_e2o_relationship":            detect_dangling_e2o_relationship(src),
+        "missing_event_timestamp":              detect_missing_event_timestamp(src),
+        "missing_event":                        detect_missing_event(src),
+        "missing_event_type":                   detect_missing_event_type(src),
+        "missing_object":                       detect_missing_object(src),
     }
