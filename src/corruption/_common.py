@@ -13,13 +13,10 @@ from pathlib import Path
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 DEFAULT_CLEAN_PATH = str(_DATA_DIR / "order-management-clean.sqlite")
-DEFAULT_DIRTY_PATH = str(_DATA_DIR / "order-management.sqlite")        # legacy output
 DEFAULT_FULL_PATH = str(_DATA_DIR / "order-management-full.sqlite")     # level='all' output
 
 
 def _default_dst_for_level(level: str) -> str:
-    if level == "legacy":
-        return DEFAULT_DIRTY_PATH
     if level == "all":
         return DEFAULT_FULL_PATH
     return str(_DATA_DIR / f"order-management-{level}.sqlite")

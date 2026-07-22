@@ -64,13 +64,13 @@ def issue_labels():
         "missing_event_timestamp":           "Missing Event Time",
         "missing_object":                    "Missing Object",
         "missing_object_type":               "Missing Object Type",
-        "missing_attribute_value":           "Missing Object Attribute",
+        "missing_attribute_value":           "Missing Obj. Attr. Value",
         "dangling_o2o_relationship":         "Missing Object-to-Object",
         "dangling_e2o_relationship":         "Missing Event-to-Object",
         "duplicate_objects_on_ids":          "Incorrect Object (by ID)",
         "duplicate_objects_on_attributes":   "Incorrect Object (by attributes)",
         "incorrect_object_type":             "Incorrect Object Type",
-        "incorrect_attribute_datatype":      "Incorrect Object Attribute",
+        "incorrect_attribute_datatype":      "Incorrect Obj. Attr. Value",
     }
     # Synthetic sentinel for the merged N6 cell (paper §4.2), which spans
     # both duplicate detectors under a single "Incorrect Object" heading.
@@ -422,12 +422,18 @@ def overview_config():
 
     # Columns follow paper Table 3 (Basmer et al.): three OCED dimensions —
     # Events, Objects, Relations — with the columns inside each group listed
-    # in paper order. `Event Attribute` under Events is included even
-    # though no detector exists yet — it renders as dashes. The paper's
-    # `Position` column is omitted per user preference (never populated).
+    # in paper order. The paper's single `… Attribute` column is split here
+    # into schema-level (`… Attribute`: column existence / name / declared
+    # type) vs data-level (`… Attribute Value`: the cell value on a given
+    # row) — the repo's detectors and resolvers today all operate on
+    # values, not schema, so keeping them separate makes the mapping
+    # honest. Columns without a detector yet — `Event Attribute`,
+    # `Object Attribute`, `Event Attribute Value` — are included as
+    # placeholders and render as dashes. The paper's `Position` column
+    # is omitted per user preference (never populated).
     col_groups = [
-        ("Events",    ["Event", "Event Type", "Event Time", "Event Attribute"]),
-        ("Objects",   ["Object", "Object Type", "Object Attribute"]),
+        ("Events",    ["Event", "Event Type", "Event Time", "Evt. Attr.", "Evt. Attr. Value"]),
+        ("Objects",   ["Object", "Object Type", "Obj. Attr.", "Obj. Attr. Value"]),
         ("Relations", ["Object-to-Object", "Event-to-Object"]),
     ]
     cols_flat = [c for _, cs in col_groups for c in cs]
@@ -442,9 +448,9 @@ def overview_config():
         # ("Missing Data", "Position"):         I5  — no detector yet
 
         # Objects row
-        ("Missing Data",   "Object"):           ["missing_object"],              # N1
-        ("Missing Data",   "Object Type"):      ["missing_object_type"],         # N2
-        ("Missing Data",   "Object Attribute"): ["missing_attribute_value"],     # N3
+        ("Missing Data",   "Object"):                 ["missing_object"],              # N1
+        ("Missing Data",   "Object Type"):            ["missing_object_type"],         # N2
+        ("Missing Data",   "Obj. Attr. Value"):       ["missing_attribute_value"],     # N3
 
         # Relations row
         ("Missing Data",   "Object-to-Object"): ["dangling_o2o_relationship"],   # N4
@@ -455,8 +461,8 @@ def overview_config():
         ("Incorrect Data", "Object"):           [                                 # N6
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
-        ("Incorrect Data", "Object Type"):      ["incorrect_object_type"],       # N7
-        ("Incorrect Data", "Object Attribute"): ["incorrect_attribute_datatype"],# N8
+        ("Incorrect Data", "Object Type"):            ["incorrect_object_type"],       # N7
+        ("Incorrect Data", "Obj. Attr. Value"):       ["incorrect_attribute_datatype"],# N8
     }
     llm_detected_keys = {"incorrect_object_type"}
     return col_groups, cols_flat, llm_detected_keys, mapping, rows
