@@ -1668,15 +1668,29 @@ def drill_fix_rows(ctx, source_rows):
 
 
 @app.cell
-def drill_fix_picker(ctx, dr, fix_rows, get_fix_row_idx, mo):
+def drill_fix_picker(
+    PAGE_SIZE, ctx, dr, fix_rows, get_fix_row_idx, mo, pager_buttons,
+):
     """Searchable, full-width dropdown for choosing which detected row
     to fix. The user's pick is mirrored into `set_fix_row_idx` by the
     observer below so it survives cell reruns; when the drilled-in
     issue changes, `fix_row_reset_on_issue` clears the state back to 0.
 
+    The dropdown is **windowed to the same page(s) the detection table
+    is currently showing**. `fix_rows` can contain 100k+ rows on large
+    fixtures (Enron duplicate events) and marimo serializes every
+    dropdown option into the cell output — putting all of them in would
+    push the cell past marimo's `output_max_bytes` and hide the whole
+    drill-in behind an "output too large" banner. The picker follows
+    the pager on the table above: clicking Prev/Next shifts which rows
+    are reachable here too.
+
     Two outputs:
       - `row_picker` — the widget (or a fallback `mo.md(...)`), used by
-        downstream cells that read `.value`.
+        downstream cells that read `.value`. The value is an index into
+        the full `fix_rows` list, not the visible slice, so
+        `drill_fix_suggest` and `drill_fix_apply` do not need to know
+        the picker is windowed.
       - `row_picker_view` — the rendered layout for the shell (label +
         dropdown on the same row, with the dropdown taking the remaining
         horizontal space).
@@ -1693,21 +1707,69 @@ def drill_fix_picker(ctx, dr, fix_rows, get_fix_row_idx, mo):
         ).callout(kind="neutral")
         row_picker_view = row_picker
     else:
-        labels = [dr.row_preview_label(_row, _i) for _i, _row in enumerate(fix_rows)]
-        _current_idx = get_fix_row_idx()
-        # Clamp to a valid label — the state may still point at an index
-        # from a previous (larger) issue we drilled into.
-        if _current_idx is None or _current_idx < 0 or _current_idx >= len(labels):
-            _current_idx = 0
+        # Build the visible window by asking each source-issue pager what
+        # page it's on and taking that slice. Mirrors drill_rule_render's
+        # per-source pagination so table and picker stay aligned. Original
+        # fix_rows indices are preserved as the dropdown option values so
+        # downstream cells (drill_fix_suggest / drill_fix_apply) can index
+        # fix_rows directly.
+        _by_source: dict[str, list[int]] = {}
+        for _i, _row in enumerate(fix_rows):
+            _by_source.setdefault(_row["_source_issue_key"], []).append(_i)
+
+        _visible_indices: list[int] = []
+        for _src_key, _idxs in _by_source.items():
+            _n_all = len(_idxs)
+            _prev_v = (pager_buttons[f"{_src_key}__prev"].value
+                       if f"{_src_key}__prev" in pager_buttons.value else 0)
+            _next_v = (pager_buttons[f"{_src_key}__next"].value
+                       if f"{_src_key}__next" in pager_buttons.value else 0)
+            _page, _max_page, _start, _stop = dr.page_bounds(
+                _n_all, PAGE_SIZE, _prev_v or 0, _next_v or 0
+            )
+            _visible_indices.extend(_idxs[_start:_stop])
+
+        # Build labels (still uses each row's ORIGINAL index in fix_rows
+        # as the "#N" prefix, so users see the same numbering as the
+        # detection table).
+        _labels_with_indices = [
+            (dr.row_preview_label(fix_rows[_i], _i), _i) for _i in _visible_indices
+        ]
+        # De-dup identical labels — row_preview_label falls back to
+        # "row {i}" when no ocel_* key is present, so the (label, index)
+        # pairs are unique by construction; but if two visible rows share
+        # ocel_ids we tie-break by suffixing the index. Preserves
+        # dropdown-option uniqueness (dict keys must be unique).
+        _seen: dict[str, int] = {}
+        _labels: list[str] = []
+        _indices: list[int] = []
+        for _lab, _i in _labels_with_indices:
+            if _lab in _seen:
+                _lab = f"{_lab}  ·  #{_i}"
+            _seen[_lab] = _i
+            _labels.append(_lab)
+            _indices.append(_i)
+
+        # Pick the initial dropdown value: prefer the stored fix_row_idx
+        # if it happens to be in the visible window; otherwise snap to
+        # the first visible row so the picker always has a valid label.
+        _stored_idx = get_fix_row_idx()
+        try:
+            _pos = _indices.index(_stored_idx) if _stored_idx is not None else -1
+        except ValueError:
+            _pos = -1
+        if _pos < 0:
+            _pos = 0
+
         row_picker = mo.ui.dropdown(
-            options=dict(zip(labels, range(len(labels)))),
-            value=labels[_current_idx],
+            options=dict(zip(_labels, _indices)),
+            value=_labels[_pos],
             searchable=True,
             full_width=True,
         )
         # Label sits inline to the left, dropdown fills the remaining
         # horizontal space (widths=[0, 1] gives the dropdown all the flex).
-        row_picker_view = mo.hstack(
+        _picker_row = mo.hstack(
             [
                 mo.Html(
                     '<div style="font-size:13px; font-weight:600; '
@@ -1720,6 +1782,19 @@ def drill_fix_picker(ctx, dr, fix_rows, get_fix_row_idx, mo):
             gap=0.75,
             widths=[0, 1],
         )
+        # A hint below the picker when it's windowed, so it's clear that
+        # rows outside the current table page aren't in the dropdown.
+        if len(fix_rows) > len(_indices):
+            _hint = mo.Html(
+                '<div style="font-size:12px; color:#57606a; margin-top:4px;">'
+                f"Row picker follows the table page above — "
+                f"{len(_indices):,} of {len(fix_rows):,} detected rows shown. "
+                f"Use Prev / Next on the table to bring other rows into scope."
+                "</div>"
+            )
+            row_picker_view = mo.vstack([_picker_row, _hint], gap=0.25)
+        else:
+            row_picker_view = _picker_row
     return row_picker, row_picker_view
 
 
