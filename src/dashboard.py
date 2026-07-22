@@ -632,11 +632,15 @@ def overview_selector(
     _row_options = [_row for _row in rows if any(_has_issues(_row, _c) for _c in cols_flat)]
     _persisted_row = get_overview_row()
     _initial_row = _persisted_row if _persisted_row in _row_options else None
+    # Guard against empty options — if no rows are eligible (e.g. mid-rebuild
+    # after a sweep), render a disabled sentinel rather than passing an
+    # empty list into mo.ui.dropdown.
     row_picker_widget = mo.ui.dropdown(
-        options=_row_options,
+        options=_row_options or ["— no categories —"],
         label="Category:",
         value=_initial_row,
         on_change=set_overview_row,
+        disabled=not _row_options,
     )
     return (row_picker_widget,)
 
@@ -682,13 +686,25 @@ def overview_column_selector(
 
     _persisted_col = get_overview_col()
     _initial_col = _persisted_col if _persisted_col in _col_options.values() else None
+    # Guard against empty options — if the picked row has no eligible
+    # columns (or no row is picked yet), render a disabled sentinel
+    # rather than passing an empty dict into mo.ui.dropdown.
     col_picker_widget = mo.ui.dropdown(
-        options=_col_options,
+        options=_col_options or {"— no dimensions —": None},
         label="Dimension:",
         value=_initial_col,
         on_change=set_overview_col,
+        disabled=not _col_options,
     )
-    mo.hstack([row_picker_widget, col_picker_widget], justify="start", gap=1)
+    # Bind the hstack to a local so it's unambiguously the cell's output —
+    # a bare expression immediately followed by ``return`` can be fragile
+    # in marimo's cell-output parsing, and this cell has been observed to
+    # stop rendering after LLM-sweep state cascades. Same pattern used in
+    # ``drill_shell_top`` / ``drill_shell_bottom``.
+    _pickers_row = mo.hstack(
+        [row_picker_widget, col_picker_widget], justify="start", gap=1,
+    )
+    _pickers_row
     return (col_picker_widget,)
 
 
@@ -1625,7 +1641,13 @@ def drill_shell_bottom(
 
         # Fix area — picker + action buttons + suggestion view + apply view.
         _fix_stack: list = []
-        _fix_stack.append(mo.md("### Fix a detected issue"))
+        _fix_stack.append(mo.Html(
+            '<div style="margin:24px 0 8px 0; padding-bottom:6px; '
+            'border-bottom:1px solid #d0d7de;">'
+            '<div style="font-size:16px; font-weight:700; color:#1f2328;">'
+            'Fix a detected issue</div>'
+            '</div>'
+        ))
         _fix_stack.append(row_picker_view if row_picker_view is not None else mo.md(""))
         _fix_stack.append(fix_buttons_view if fix_buttons_view is not None else mo.md(""))
         if suggest_view is not None:
