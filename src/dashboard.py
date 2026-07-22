@@ -685,7 +685,16 @@ def overview_column_selector(
                 _col_options[f"{_group_name}: {_col}"] = _col
 
     _persisted_col = get_overview_col()
-    _initial_col = _persisted_col if _persisted_col in _col_options.values() else None
+    # ``mo.ui.dropdown`` with a dict-shaped ``options`` validates the
+    # ``value=`` argument against the option KEYS (labels), but passes
+    # the mapped VALUE to ``on_change``. We persist the bare column
+    # name (what downstream code reads via ``widget.value``); translate
+    # it back to the label here so validation succeeds on rebuild —
+    # without this, a persisted "Object Type" is rejected against
+    # keys like "Objects: Object Type" and the whole cell crashes,
+    # taking the row picker down with it.
+    _label_for_col = {v: k for k, v in _col_options.items()}
+    _initial_label = _label_for_col.get(_persisted_col)
     # Guard against empty options — if the picked row has no eligible
     # columns (or no row is picked yet), render a sentinel placeholder
     # rather than passing an empty dict into mo.ui.dropdown. (We don't
@@ -694,7 +703,7 @@ def overview_column_selector(
     col_picker_widget = mo.ui.dropdown(
         options=_col_options or {"— no dimensions —": None},
         label="Dimension:",
-        value=_initial_col,
+        value=_initial_label,
         on_change=set_overview_col,
     )
     # Bind the hstack to a local so it's unambiguously the cell's output —
