@@ -65,13 +65,17 @@ def suggest_repair(
     return actions.from_task_result(task, row, payload)
 
 
-def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionResult:
+def detect_with_llm(
+    issue_key: str, row: dict, sqlite_path: str, *, use_hints: bool = True
+) -> DetectionResult:
     """Ask the LLM to *detect* whether `row` is a real violation.
 
     Mirrors `suggest_repair` but stops at the LLM's verdict instead of
     constructing an ActionResult. Only valid for DetectionTask issue keys --
     raises ValueError otherwise so call sites stay self-documenting.
-    """
+
+    `use_hints=False` builds the context without exploration hints — used by
+    the evaluation to measure the hints' effect, same as `suggest_repair`."""
     task = get_task(issue_key)
     if task is None:
         raise ValueError(f"No LLM task registered for {issue_key!r}.")
@@ -81,7 +85,7 @@ def detect_with_llm(issue_key: str, row: dict, sqlite_path: str) -> DetectionRes
             f"Use suggest_repair instead."
         )
     with _connect(sqlite_path) as conn:
-        ctx = task.build_context(conn, row)
+        ctx = task.build_context(conn, row, use_hints=use_hints)
     try:
         payload = _call_task_or_legacy(task, ctx)
     except LLMOutputInvalid as e:
