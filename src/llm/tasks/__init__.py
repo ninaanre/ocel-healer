@@ -22,6 +22,8 @@ from src.llm.tasks import (
     missing_event_type,
     missing_event_timestamp,
     missing_object,
+    missing_object_attribute,
+    missing_event_attribute,
 )
 
 
