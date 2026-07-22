@@ -33,22 +33,28 @@ RULE_DETECTORS = (
     "dangling_o2o_relationship",
     "dangling_e2o_relationship",
 )
+# `missing_event_attribute_value` and `incorrect_event_attribute_datatype`
+# exist as rule detectors but aren't in RULE_DETECTORS: the corruption
+# injectors don't yet produce event-attribute defects. Adding those
+# injectors would extend both this tuple and the coverage tests below.
 
 # Counts on the pristine clean DB.  Only `duplicate_objects_on_attributes` is
 # non-zero — OCEL change rows legitimately share (time, changed_field, value)
 # fingerprints, so the detector picks them up as attribute duplicates.
 CLEAN_BASELINE = {
-    "missing_object_type":              0,
-    "missing_attribute_value":          0,
-    "missing_event":                    0,
-    "missing_event_type":               0,
-    "missing_event_timestamp":          0,
-    "missing_object":                   0,
-    "duplicate_objects_on_ids":         0,
-    "duplicate_objects_on_attributes":  384,
-    "incorrect_attribute_datatype":     0,
-    "dangling_o2o_relationship":        0,
-    "dangling_e2o_relationship":        0,
+    "missing_object_type":               0,
+    "missing_attribute_value":           0,
+    "missing_event":                     0,
+    "missing_event_type":                0,
+    "missing_event_timestamp":           0,
+    "missing_event_attribute_value":     0,
+    "missing_object":                    0,
+    "duplicate_objects_on_ids":          0,
+    "duplicate_objects_on_attributes":   384,
+    "incorrect_attribute_datatype":      0,
+    "incorrect_event_attribute_datatype": 0,
+    "dangling_o2o_relationship":         0,
+    "dangling_e2o_relationship":         0,
 }
 
 

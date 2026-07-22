@@ -49,6 +49,20 @@ class CoercedValueOutput(TaskOutput):
     coerced_value: Any = None
 
 
+class ImplausibleValueOutput(TaskOutput):
+    """incorrect_attribute_value (LLM detection task).
+
+    The value passed the rule-based datatype check but may be semantically
+    implausible for its attribute (e.g. negative price, out-of-vocab enum,
+    impossible date). `suggested_value` is null when the value looks
+    plausible — the row is not flagged. When non-null it must differ from
+    the current value; the same suggested value flags the row and doubles
+    as the coercion target for the fix path.
+    """
+
+    suggested_value: Any = None
+
+
 class InferredValueOutput(TaskOutput):
     """missing_attribute_value.
 
@@ -125,6 +139,7 @@ __all__ = [
     "TaskOutput",
     "InferredTypeOutput",
     "CoercedValueOutput",
+    "ImplausibleValueOutput",
     "InferredValueOutput",
     "InferredReferentOutput",
     "CanonicalValueOutput",
