@@ -165,10 +165,17 @@ def overview_picker_state(mo):
     get_overview_row, set_overview_row = mo.state(None)
     get_overview_col, set_overview_col = mo.state(None)
     get_picked_type, set_picked_type = mo.state(None)
+    # (sqlite_path, issue_key, ocel_type) of the sweep whose "Judged N …
+    # → K proposed flag(s)" banner is currently visible. Set to the just-
+    # completed key by `drill_llm_sweep`; cleared to None by any user
+    # interaction (Confirm, Dismiss, type-picker change, file switch).
+    get_banner_key, set_banner_key = mo.state(None)
     return (
+        get_banner_key,
         get_overview_col,
         get_overview_row,
         get_picked_type,
+        set_banner_key,
         set_overview_col,
         set_overview_row,
         set_picked_type,
@@ -190,6 +197,7 @@ def fix_row_selection_state(mo):
 def selection_reset_on_file(
     file_picker,
     mo,
+    set_banner_key,
     set_fix_row_idx,
     set_overview_col,
     set_overview_row,
@@ -210,6 +218,7 @@ def selection_reset_on_file(
         set_overview_row(None)
         set_overview_col(None)
         set_picked_type(None)
+        set_banner_key(None)
         set_prev_path(current_path)
 
     _current = file_picker.value or ""
@@ -793,6 +802,7 @@ def drill_llm_controls(
     connect_sqlite,
     llm_enabled,
     mo,
+    set_banner_key,
     set_picked_type,
     sqlite_path,
 ):
@@ -803,7 +813,8 @@ def drill_llm_controls(
 
     The type picker's value is mirrored in `get_picked_type`/`set_picked_type`
     so mode transitions (which cause this cell to re-run and rebuild the
-    widget) don't wipe the user's pick."""
+    widget) don't wipe the user's pick. Picking a different type also
+    clears the sweep banner via `set_banner_key(None)`."""
     if ctx["mode"] not in ("llm_pending", "llm_with_flags"):
         # Widgets must still exist so downstream cells can read them, but
         # they don't need to be usable.
@@ -814,12 +825,17 @@ def drill_llm_controls(
             _types = [t for t, _ in object_type_tables(_conn)]
         _persisted_type = get_picked_type()
         _initial_type = _persisted_type if _persisted_type in _types else None
+
+        def _on_type_change(v):
+            set_picked_type(v)
+            set_banner_key(None)   # any user interaction hides the sweep banner
+
         type_picker = mo.ui.dropdown(
             options=_types,
             label="Object type",
             searchable=True,
             value=_initial_type,
-            on_change=set_picked_type,
+            on_change=_on_type_change,
         )
         detect_btn = mo.ui.run_button(
             label="Run detection on selected type",
@@ -885,6 +901,7 @@ def drill_llm_sweep(
     get_sweep_ran,
     get_sweep_result,
     mo,
+    set_banner_key,
     set_sweep_ordinal,
     set_sweep_ran,
     set_sweep_result,
@@ -976,6 +993,9 @@ def drill_llm_sweep(
             "order":         _order,
         }
         set_sweep_result(_all)
+        # Show the "Judged N … → K proposed flag(s)" banner for exactly
+        # this sweep; cleared by any subsequent user interaction.
+        set_banner_key((sqlite_path, _issue_key, chosen_type))
 
         _marker = (sqlite_path, _issue_key)
         _ran = set(get_sweep_ran())
@@ -1045,6 +1065,7 @@ def drill_llm_confirm_buttons(mo, proposals_all):
 def drill_llm_confirm_render(
     agree_array,
     ctx,
+    get_banner_key,
     get_flags,
     get_sweep_result,
     mo,
@@ -1056,12 +1077,19 @@ def drill_llm_confirm_render(
     """Render one summary line per swept type followed by any un-actioned
     proposal cards for that type. Confirmed proposals (present in
     ``get_flags``) are dropped entirely; dismissed proposals (present in
-    the sweep entry's ``dismissed`` set) are also dropped."""
+    the sweep entry's ``dismissed`` set) are also dropped.
+
+    The per-type "Judged N … → K proposed flag(s)" callout is only
+    emitted for the sweep whose key matches ``get_banner_key()`` — that
+    key is set by ``drill_llm_sweep`` at completion and cleared by any
+    subsequent user interaction (Confirm, Dismiss, type-picker change,
+    file switch)."""
     llm_view = None
     if ctx["mode"] in ("llm_pending", "llm_with_flags") and swept_types:
         current_flags = get_flags()
         _sweep_all = get_sweep_result()
         _issue_key = ctx["issue_key"]
+        _banner_key = get_banner_key()
 
         # Group proposals by ocel_type so each type's cards render under
         # its own summary line.
@@ -1071,8 +1099,9 @@ def drill_llm_confirm_render(
 
         _parts: list = []
         for _t, _total, _flagged, _summary_text in swept_types:
-            _kind = "info" if _flagged else "success"
-            _parts.append(mo.md(_summary_text).callout(kind=_kind))
+            if (sqlite_path, _issue_key, _t) == _banner_key:
+                _kind = "info" if _flagged else "success"
+                _parts.append(mo.md(_summary_text).callout(kind=_kind))
             _entry = _sweep_all.get((sqlite_path, _issue_key, _t)) or {}
             _dismissed = _entry.get("dismissed", set())
             _cards: list = []
@@ -1121,7 +1150,7 @@ def drill_llm_confirm_render(
 
 @app.cell
 def drill_llm_agree_observer(
-    agree_array, ctx, get_flags, proposals_all, set_flags, sqlite_path,
+    agree_array, ctx, get_flags, proposals_all, set_banner_key, set_flags, sqlite_path,
 ):
     """When a Confirm button is clicked, add the proposal to get_flags()."""
     if (
@@ -1147,6 +1176,7 @@ def drill_llm_agree_observer(
                 changed = True
         if changed:
             set_flags(current)
+            set_banner_key(None)   # any user interaction hides the sweep banner
     return
 
 
@@ -1156,6 +1186,7 @@ def drill_llm_reject_observer(
     get_sweep_result,
     proposals_all,
     reject_array,
+    set_banner_key,
     set_sweep_result,
     sqlite_path,
 ):
@@ -1187,6 +1218,7 @@ def drill_llm_reject_observer(
             _changed = True
         if _changed:
             set_sweep_result(_all)
+            set_banner_key(None)   # any user interaction hides the sweep banner
     return
 
 
