@@ -155,6 +155,27 @@ def selection_state(mo):
 
 
 @app.cell
+def overview_picker_state(mo):
+    # Persisted (row_label, col_label) picks for the overview cascade,
+    # plus the LLM sweep's picked object type. Widget rebuilds — which
+    # fire whenever `overview_meta` recomputes (e.g. after any set_flags
+    # write) or `ctx` transitions — preserve these via
+    # `mo.ui.dropdown(value=…)`, so a Confirm click no longer wipes the
+    # user's drill selection or type pick.
+    get_overview_row, set_overview_row = mo.state(None)
+    get_overview_col, set_overview_col = mo.state(None)
+    get_picked_type, set_picked_type = mo.state(None)
+    return (
+        get_overview_col,
+        get_overview_row,
+        get_picked_type,
+        set_overview_col,
+        set_overview_row,
+        set_picked_type,
+    )
+
+
+@app.cell
 def fix_row_selection_state(mo):
     # Flat index into `fix_rows` for the row currently queued for fixing.
     # Written either by the "Select" buttons next to each detection-table
@@ -170,18 +191,25 @@ def selection_reset_on_file(
     file_picker,
     mo,
     set_fix_row_idx,
+    set_overview_col,
+    set_overview_row,
+    set_picked_type,
     set_selected_issue,
 ):
     # Side-effect cell: whenever the picked file changes, clear the drill-in
     # selection so nothing leaks across files. `get_flags` and
     # `get_sweep_ran` already key by path, so they don't need reset. The
-    # cascading dropdowns hold their own value, so they reset naturally
-    # when their option sets recompute against the new file.
+    # overview / type pickers are backed by state (see
+    # `overview_picker_state`) so we clear those explicitly here to avoid
+    # a stale row/col/type appearing after switching files.
     get_prev_path, set_prev_path = mo.state("__init__")
 
     def _reset(current_path: str):
         set_selected_issue(None)
         set_fix_row_idx(0)
+        set_overview_row(None)
+        set_overview_col(None)
+        set_picked_type(None)
         set_prev_path(current_path)
 
     _current = file_picker.value or ""
@@ -555,9 +583,11 @@ def overview_layout(
 @app.cell
 def overview_selector(
     cols_flat,
+    get_overview_row,
     mo,
     overview_cell_meta,
     rows,
+    set_overview_row,
 ):
     """Row-first cascading dropdowns for the drill-in focus.
 
@@ -567,11 +597,12 @@ def overview_selector(
     the *OCED dimension* (column). The picked (row, col) cell is
     resolved to an issue key downstream in `overview_selector_resolve`.
 
-    No `on_change` callbacks — the dropdowns hold their own value and
-    downstream cells read `.value` in the standard marimo way. Empty
-    combinations are hidden (rows with no populated columns are excluded
-    from the row dropdown; columns not intersecting the picked row are
-    excluded from the column dropdown).
+    The dropdown's value is mirrored in `get_overview_row`/`set_overview_row`
+    so that widget rebuilds (which fire whenever `overview_meta` recomputes
+    — e.g. after any `set_flags` write) don't clobber the user's selection.
+    Empty combinations are hidden (rows with no populated columns are
+    excluded from the row dropdown; columns not intersecting the picked
+    row are excluded from the column dropdown).
     """
     # Inverse index: (row_label, col_label) -> cell meta. `overview_cell_meta`
     # is keyed by "r_idx:c_idx" — build a label-keyed view once so filtering
@@ -590,9 +621,13 @@ def overview_selector(
     # Rendered in `overview_column_selector` below alongside the column
     # picker so both dropdowns share one hstack row.
     _row_options = [_row for _row in rows if any(_has_issues(_row, _c) for _c in cols_flat)]
+    _persisted_row = get_overview_row()
+    _initial_row = _persisted_row if _persisted_row in _row_options else None
     row_picker_widget = mo.ui.dropdown(
         options=_row_options,
         label="Category:",
+        value=_initial_row,
+        on_change=set_overview_row,
     )
     return (row_picker_widget,)
 
@@ -600,13 +635,20 @@ def overview_selector(
 @app.cell
 def overview_column_selector(
     col_groups,
+    get_overview_col,
     mo,
     overview_cell_meta,
     row_picker_widget,
+    set_overview_col,
 ):
     """Column dropdown, cascaded from the row picker. Rebuilt whenever the
     row picker's value changes so its options only include columns that
-    intersect the picked row and are non-empty."""
+    intersect the picked row and are non-empty.
+
+    Mirrored in `get_overview_col`/`set_overview_col` so rebuilds
+    triggered by upstream state changes (e.g. `set_flags` writes rippling
+    through `overview_meta` → `overview_selector`) don't clobber the
+    user's column pick."""
     _selected_row = row_picker_widget.value
 
     _by_labels: dict[tuple[str, str], dict] = {
@@ -629,9 +671,13 @@ def overview_column_selector(
                     continue
                 _col_options[f"{_group_name}: {_col}"] = _col
 
+    _persisted_col = get_overview_col()
+    _initial_col = _persisted_col if _persisted_col in _col_options.values() else None
     col_picker_widget = mo.ui.dropdown(
         options=_col_options,
         label="Dimension:",
+        value=_initial_col,
+        on_change=set_overview_col,
     )
     mo.hstack([row_picker_widget, col_picker_widget], justify="start", gap=1)
     return (col_picker_widget,)
@@ -742,16 +788,22 @@ def drill_router(
 @app.cell
 def drill_llm_controls(
     ctx,
+    get_picked_type,
     object_type_tables,
     connect_sqlite,
     llm_enabled,
     mo,
+    set_picked_type,
     sqlite_path,
 ):
     """Object-type picker + Run button. Available in ``llm_pending`` AND
     ``llm_with_flags`` — the mode transitions to ``llm_with_flags`` after
     the first Confirm, but the user may still want to run sweeps on other
-    object types."""
+    object types.
+
+    The type picker's value is mirrored in `get_picked_type`/`set_picked_type`
+    so mode transitions (which cause this cell to re-run and rebuild the
+    widget) don't wipe the user's pick."""
     if ctx["mode"] not in ("llm_pending", "llm_with_flags"):
         # Widgets must still exist so downstream cells can read them, but
         # they don't need to be usable.
@@ -760,10 +812,14 @@ def drill_llm_controls(
     else:
         with connect_sqlite(sqlite_path) as _conn:
             _types = [t for t, _ in object_type_tables(_conn)]
+        _persisted_type = get_picked_type()
+        _initial_type = _persisted_type if _persisted_type in _types else None
         type_picker = mo.ui.dropdown(
             options=_types,
             label="Object type",
             searchable=True,
+            value=_initial_type,
+            on_change=set_picked_type,
         )
         detect_btn = mo.ui.run_button(
             label="Run detection on selected type",
