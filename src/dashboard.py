@@ -70,19 +70,19 @@ def issue_labels():
         "missing_event":                     "Missing Event",
         "missing_event_type":                "Missing Event Type",
         "missing_event_timestamp":           "Missing Event Time",
-        "missing_event_attribute_value":     "Missing Evt. Attr. Value",
+        "missing_event_attribute_value":     "Missing Event Attribute Value",
         "missing_object":                    "Missing Object",
         "missing_object_type":               "Missing Object Type",
-        "missing_attribute_value":           "Missing Obj. Attr. Value",
+        "missing_attribute_value":           "Missing Object Attribute Value",
         "dangling_o2o_relationship":         "Missing Object-to-Object",
         "dangling_e2o_relationship":         "Missing Event-to-Object",
         "duplicate_objects_on_ids":          "Incorrect Object (by ID)",
         "duplicate_objects_on_attributes":   "Incorrect Object (by attributes)",
         "incorrect_object_type":             "Incorrect Object Type",
-        "incorrect_attribute_datatype":      "Incorrect Obj. Attr. Type",
-        "incorrect_attribute_value":         "Incorrect Obj. Attr. Value",
-        "incorrect_event_attribute_datatype": "Incorrect Evt. Attr. Type",
-        "incorrect_event_attribute_value":    "Incorrect Evt. Attr. Value",
+        "incorrect_attribute_datatype":      "Incorrect Object Attribute Type",
+        "incorrect_attribute_value":         "Incorrect Object Attribute Value",
+        "incorrect_event_attribute_datatype": "Incorrect Event Attribute Type",
+        "incorrect_event_attribute_value":    "Incorrect Event Attribute Value",
     }
     # Synthetic sentinel for the merged N6 cell (paper §4.2), which spans
     # both duplicate detectors under a single "Incorrect Object" heading.
@@ -464,16 +464,16 @@ def overview_config():
     # row) — the repo's detectors and resolvers today all operate on
     # values, not schema, so keeping them separate makes the mapping
     # honest. Each `… Attribute Value` column is further split into
-    # `… Attr. Type` (rule-based SQLite affinity check) and
-    # `… Attr. Value` (LLM-based semantic-plausibility check) so the two
+    # `… Attribute Type` (rule-based SQLite affinity check) and
+    # `… Attribute Value` (LLM-based semantic-plausibility check) so the two
     # detection mechanisms have their own cells; this applies symmetrically
     # to Events and Objects. Columns without a detector yet — the
-    # schema-level `Evt. Attr.` and `Obj. Attr.` placeholders — render as
-    # dashes. The paper's `Position` column is omitted per user preference
-    # (never populated).
+    # schema-level `Event Attribute` and `Object Attribute` placeholders —
+    # render as dashes. The paper's `Position` column is omitted per user
+    # preference (never populated).
     col_groups = [
-        ("Events",    ["Event", "Event Type", "Event Time", "Evt. Attr.", "Evt. Attr. Type", "Evt. Attr. Value"]),
-        ("Objects",   ["Object", "Object Type", "Obj. Attr.", "Obj. Attr. Type", "Obj. Attr. Value"]),
+        ("Events",    ["Event", "Event Type", "Event Time", "Event Attribute", "Event Attribute Type", "Event Attribute Value"]),
+        ("Objects",   ["Object", "Object Type", "Object Attribute", "Object Attribute Type", "Object Attribute Value"]),
         ("Relations", ["Object-to-Object", "Event-to-Object"]),
     ]
     cols_flat = [c for _, cs in col_groups for c in cs]
@@ -484,17 +484,17 @@ def overview_config():
         ("Missing Data",   "Event"):            ["missing_event"],               # I2
         ("Missing Data",   "Event Type"):       ["missing_event_type"],          # I6
         ("Missing Data",   "Event Time"):       ["missing_event_timestamp"],     # I7
-        ("Missing Data",   "Evt. Attr. Value"): ["missing_event_attribute_value"], # I9 (value)
-        # ("Missing Data", "Evt. Attr."):       I9-schema — no detector yet
-        # ("Missing Data", "Position"):         I5     — no detector yet
+        ("Missing Data",   "Event Attribute Value"): ["missing_event_attribute_value"], # I9 (value)
+        # ("Missing Data", "Event Attribute"):    I9-schema — no detector yet
+        # ("Missing Data", "Position"):           I5     — no detector yet
 
         # Objects row
-        ("Missing Data",   "Object"):                 ["missing_object"],              # N1
-        ("Missing Data",   "Object Type"):            ["missing_object_type"],         # N2
-        ("Missing Data",   "Obj. Attr. Value"):       ["missing_attribute_value"],     # N3
-        # ("Missing Data", "Obj. Attr. Type"):        N3-schema — no detector yet
+        ("Missing Data",   "Object"):                    ["missing_object"],              # N1
+        ("Missing Data",   "Object Type"):               ["missing_object_type"],         # N2
+        ("Missing Data",   "Object Attribute Value"):    ["missing_attribute_value"],     # N3
+        # ("Missing Data", "Object Attribute Type"):     N3-schema — no detector yet
         #   (a missing value can't be datatype-wrong; missingness lives under
-        #   Obj. Attr. Value alongside the LLM value check.)
+        #   Object Attribute Value alongside the LLM value check.)
 
         # Relations row
         ("Missing Data",   "Object-to-Object"): ["dangling_o2o_relationship"],   # N4
@@ -505,11 +505,11 @@ def overview_config():
         ("Incorrect Data", "Object"):           [                                 # N6
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
-        ("Incorrect Data", "Object Type"):            ["incorrect_object_type"],       # N7
-        ("Incorrect Data", "Obj. Attr. Type"):        ["incorrect_attribute_datatype"],# N8a (rule)
-        ("Incorrect Data", "Obj. Attr. Value"):       ["incorrect_attribute_value"],   # N8b (LLM)
-        ("Incorrect Data", "Evt. Attr. Type"):        ["incorrect_event_attribute_datatype"], # I8a (rule)
-        ("Incorrect Data", "Evt. Attr. Value"):       ["incorrect_event_attribute_value"],    # I8b (LLM)
+        ("Incorrect Data", "Object Type"):               ["incorrect_object_type"],       # N7
+        ("Incorrect Data", "Object Attribute Type"):     ["incorrect_attribute_datatype"],# N8a (rule)
+        ("Incorrect Data", "Object Attribute Value"):    ["incorrect_attribute_value"],   # N8b (LLM)
+        ("Incorrect Data", "Event Attribute Type"):      ["incorrect_event_attribute_datatype"], # I8a (rule)
+        ("Incorrect Data", "Event Attribute Value"):     ["incorrect_event_attribute_value"],    # I8b (LLM)
     }
     llm_detected_keys = {
         "incorrect_object_type",

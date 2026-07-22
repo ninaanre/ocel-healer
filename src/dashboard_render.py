@@ -36,6 +36,20 @@ SUMMARY_TH_STYLE = (
     "font-weight:600; vertical-align:middle; text-align:center; "
     "white-space:nowrap;"
 )
+# Vertical variant used for the 13 dimension-column headers in the overview
+# grid: labels are rotated 180° with `writing-mode:vertical-rl` so they read
+# bottom-up, which lets the column pinch down to header-font-height + a
+# little padding instead of the ~90px each horizontal label needed. Keeps
+# the paper Table 3 orientation intact without overflowing typical laptop
+# widths.
+SUMMARY_TH_VERTICAL_STYLE = (
+    "background:#f6f8fa; border-right:1px solid #d0d7de; "
+    "border-bottom:1px solid #d0d7de; padding:10px 6px; "
+    "font-weight:600; vertical-align:middle; text-align:center; "
+    "white-space:nowrap; "
+    "writing-mode:vertical-rl; transform:rotate(180deg); "
+    "line-height:1.2;"
+)
 SUMMARY_CORNER_STYLE = (
     "background:#f6f8fa; border-right:1px solid #d0d7de; "
     "border-bottom:1px solid #d0d7de; padding:6px 10px;"
@@ -152,7 +166,11 @@ def render_overview_table_html(
 
     Layout follows paper Table 3 (Basmer et al.): a corner cell, a
     group-header row spanning Events / Objects / Relations, a column-label
-    row, and one body row per entry in `rows`. `cell_meta` is keyed
+    row, and one body row per entry in `rows`. The 13 dimension column
+    labels are rendered rotated 180° via `writing-mode:vertical-rl` (see
+    `SUMMARY_TH_VERTICAL_STYLE`) so the table fits typical laptop widths
+    without overflowing horizontally; the group headers stay horizontal
+    because their `colspan` gives them room. `cell_meta` is keyed
     "r_idx:c_idx" and carries `{kind, count, row_label, col_label, issue_key}`
     for every cell — the same shape `overview_meta` builds in dashboard.py.
 
@@ -169,18 +187,23 @@ def render_overview_table_html(
     `SUMMARY_NO_BOTTOM_BORDER` suppression is applied — the browser handles
     shared-border deduplication.
     """
-    # Group-header row: corner cell + one <th colspan=len(cs)> per group.
-    _group_cells = [f'<th style="{SUMMARY_CORNER_STYLE}"></th>']
+    # Group-header row: a rowspan=2 corner cell (covers the row-label
+    # column across both header rows) + one <th colspan=len(cs)> per group.
+    _group_cells = [
+        f'<th rowspan="2" style="{SUMMARY_CORNER_STYLE}"></th>'
+    ]
     for _name, _cs in col_groups:
         _group_cells.append(
             f'<th colspan="{len(_cs)}" style="{SUMMARY_GROUP_STYLE}">{_name}</th>'
         )
     _group_row = "<tr>" + "".join(_group_cells) + "</tr>"
 
-    # Column-label row: corner + one <th> per data column.
-    _col_cells = [f'<th style="{SUMMARY_CORNER_STYLE}"></th>']
+    # Column-label row: one vertically-rotated <th> per data column. The
+    # group row's rowspan=2 corner cell already covers the row-label
+    # column's slot in this row, so no leading corner cell here.
+    _col_cells = []
     for _c in cols_flat:
-        _col_cells.append(f'<th style="{SUMMARY_TH_STYLE}">{_c}</th>')
+        _col_cells.append(f'<th style="{SUMMARY_TH_VERTICAL_STYLE}">{_c}</th>')
     _col_row = "<tr>" + "".join(_col_cells) + "</tr>"
 
     # Body rows.
