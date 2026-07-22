@@ -24,7 +24,14 @@ class ActionResult:
 
     `kind` is one of:
       "update"           -- proposed concrete value; all fields populated.
-      "delete"           -- remove duplicate rows keeping MIN(rowid).
+      "delete"           -- remove duplicate rows keeping MIN(rowid). PK can
+                            be single-column (N6 "same ocel_id repeated") or
+                            multi-column (duplicate relation triples in
+                            object_object / event_object).
+      "delete_all"       -- delete every row matching the target_pk, no
+                            MIN(rowid) preservation. Used for structurally
+                            illegal rows (e.g. O2O self-loops) where no
+                            duplicate-of-me exists to keep.
       "insert"           -- create one or more new rows (see `inserts`); used by
                             tasks like `missing_object` that must add both a row
                             to `object` and a matching initial-state row to
@@ -55,8 +62,23 @@ class ActionResult:
 
     @classmethod
     def delete(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
-        """Delete duplicate rows keeping the one with MIN(rowid)."""
+        """Delete duplicate rows keeping the one with MIN(rowid).
+
+        ``target_pk`` may hold one column (dedupe by shared id) or several
+        (dedupe by composite triple, e.g. object_object rows sharing the
+        same (source, target, qualifier)). All matching rows except the
+        MIN(rowid) survivor are removed.
+        """
         return cls(kind="delete", target_table=target_table, target_pk=target_pk, reason=reason)
+
+    @classmethod
+    def delete_all(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
+        """Delete every row matching ``target_pk`` — no MIN(rowid) survivor.
+
+        Used for structurally illegal rows (e.g. O2O self-loops) where the
+        offending row simply shouldn't exist.
+        """
+        return cls(kind="delete_all", target_table=target_table, target_pk=target_pk, reason=reason)
 
     @classmethod
     def insert(cls, *, inserts: list[dict], reason: str = "") -> "ActionResult":
@@ -242,6 +264,15 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
     if result.kind == "delete":
         return _action(
             "delete",
+            target={"target_table": result.target_table, "target_pk": result.target_pk,
+                    "column": None, "old_value": None},
+            new_value=None, rationale=result.reason or rationale,
+            confidence=confidence, issue_key=issue_key, proposed_value=None,
+        )
+
+    if result.kind == "delete_all":
+        return _action(
+            "delete_all",
             target={"target_table": result.target_table, "target_pk": result.target_pk,
                     "column": None, "old_value": None},
             new_value=None, rationale=result.reason or rationale,
@@ -521,6 +552,9 @@ def apply_repair(
     elif action["kind"] == "alter_add_column":
         if has_override:
             raise ValueError("override not supported for alter_add_column actions")
+    elif action["kind"] == "delete_all":
+        if has_override:
+            raise ValueError("override not supported for delete_all actions")
     elif action["kind"] not in ("update", "delete"):
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
@@ -571,20 +605,35 @@ def apply_repair(
 
         if action["kind"] == "delete":
             pk_items = list(action["target_pk"].items())
-            if len(pk_items) != 1:
-                raise ValueError("delete action requires exactly one primary key column")
-            pk_col, pk_val = pk_items[0]
+            if not pk_items:
+                raise ValueError("delete action requires at least one primary key column")
+            where = " AND ".join(f"{quote(c)} = ?" for c, _ in pk_items)
+            pk_vals = tuple(v for _, v in pk_items)
             sql = (
-                f"DELETE FROM {quote(table)} WHERE {quote(pk_col)} = ? "
-                f"AND rowid NOT IN (SELECT MIN(rowid) FROM {quote(table)} WHERE {quote(pk_col)} = ?)"
+                f"DELETE FROM {quote(table)} WHERE {where} "
+                f"AND rowid NOT IN (SELECT MIN(rowid) FROM {quote(table)} WHERE {where})"
             )
-            params = (pk_val, pk_val)
+            params = pk_vals + pk_vals
             rendered = f"{sql}\n  with params = {params!r}"
             if dry_run:
                 return f"-- DRY RUN (no changes written)\n{rendered}"
             with conn:
                 n = conn.execute(sql, params).rowcount
             return f"Committed: {n} duplicate row(s) deleted.\n{rendered}"
+
+        if action["kind"] == "delete_all":
+            pk_items = list(action["target_pk"].items())
+            if not pk_items:
+                raise ValueError("delete_all action requires at least one primary key column")
+            where = " AND ".join(f"{quote(c)} = ?" for c, _ in pk_items)
+            params = tuple(v for _, v in pk_items)
+            sql = f"DELETE FROM {quote(table)} WHERE {where}"
+            rendered = f"{sql}\n  with params = {params!r}"
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            with conn:
+                n = conn.execute(sql, params).rowcount
+            return f"Committed: {n} row(s) deleted.\n{rendered}"
 
         if has_override:
             new_value = _coerce_for_affinity(override_value, _column_affinity(conn, table, col))

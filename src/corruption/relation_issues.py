@@ -182,3 +182,174 @@ def inject_missing_object_product_hard(conn: sqlite3.Connection) -> str | None:
         (ev[0], missing_id, "product"),
     )
     return missing_id
+
+
+# ---------------------------------------------------------------------------
+# duplicate_o2o_relations (Easy/Medium/Hard)
+#
+# Insert extra copies of a real (source, target, qualifier) triple in
+# `object_object`. Both endpoints exist — it's the triple that's redundant.
+# The clean fixture leaves this table without a PRIMARY KEY constraint, so
+# straight INSERTs are enough; no schema tweaks needed.
+# ---------------------------------------------------------------------------
+
+
+def _insert_o2o_copies(
+    conn: sqlite3.Connection, src: str, tgt: str, qual: str, extras: int
+) -> tuple[str, str, str]:
+    for _ in range(extras):
+        conn.execute(
+            "INSERT INTO object_object VALUES (?, ?, ?)",
+            (src, tgt, qual),
+        )
+    return src, tgt, qual
+
+
+def inject_duplicate_o2o_relations_comprises_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_o2o_relations Easy: an order↔item `comprises` triple gets
+    two extra copies (3 rows total). High-frequency qualifier — the
+    duplicate stands out clearly against the surrounding 7.6k comprises
+    rows only because it repeats id-for-id."""
+    return _insert_o2o_copies(conn, "o-990001", "i-880001", "comprises", extras=2)
+
+
+def inject_duplicate_o2o_relations_places_medium(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_o2o_relations Medium: a customer↔order `places` triple
+    gets two extra copies. Cross-type edge (customer → order) rather than
+    the item-to-order path exercised in easy."""
+    src = conn.execute(
+        "SELECT ocel_source_id FROM object_object WHERE ocel_qualifier = 'places' LIMIT 1"
+    ).fetchone()
+    tgt = conn.execute(
+        "SELECT ocel_target_id FROM object_object WHERE ocel_qualifier = 'places' "
+        "AND ocel_source_id = ? LIMIT 1",
+        (src[0],) if src else (None,),
+    ).fetchone()
+    if not (src and tgt):
+        return "", "", ""
+    return _insert_o2o_copies(conn, src[0], tgt[0], "places", extras=2)
+
+
+def inject_duplicate_o2o_relations_sales_rep_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_o2o_relations Hard: a low-frequency (~15 rows total)
+    `primarySalesRep` triple gets two extra copies. Hard because the
+    surrounding qualifier is rare — one accidental extra could plausibly
+    look like a legitimate multi-rep assignment."""
+    return _insert_o2o_copies(
+        conn, "Danube Pharmaceuticals BV", "Christine von Dobbert",
+        "primarySalesRep", extras=2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# o2o_self_loop (Easy/Medium/Hard)
+#
+# Insert an `object_object` row where source == target (same object id
+# under a qualifier). Structurally illegal — an object relating to itself
+# under a qualifier is not what `object_object` is for.
+# ---------------------------------------------------------------------------
+
+
+def inject_o2o_self_loop_order_easy(conn: sqlite3.Connection) -> str:
+    """o2o_self_loop Easy: an order references itself under `contains`.
+    Easy because orders are the dataset's central entity — a self-loop
+    among them is glaring."""
+    conn.execute(
+        "INSERT INTO object_object VALUES (?, ?, ?)",
+        ("o-990001", "o-990001", "contains"),
+    )
+    return "o-990001"
+
+
+def inject_o2o_self_loop_employee_medium(conn: sqlite3.Connection) -> str:
+    """o2o_self_loop Medium: an employee references themselves under
+    `primarySalesRep`. Medium because a person being their own sales rep
+    is superficially plausible in a poorly-designed schema — but still
+    structurally wrong for O2O."""
+    conn.execute(
+        "INSERT INTO object_object VALUES (?, ?, ?)",
+        ("Wil van der Aalst", "Wil van der Aalst", "primarySalesRep"),
+    )
+    return "Wil van der Aalst"
+
+
+def inject_o2o_self_loop_product_hard(conn: sqlite3.Connection) -> str:
+    """o2o_self_loop Hard: a product references itself under a qualifier
+    that doesn't otherwise appear on products (`is a` typically links
+    items to products). Hard because the qualifier itself is
+    off-diagonal — the detector must still flag on the source=target
+    condition alone, without leaning on qualifier semantics."""
+    conn.execute(
+        "INSERT INTO object_object VALUES (?, ?, ?)",
+        ("Echo", "Echo", "is a"),
+    )
+    return "Echo"
+
+
+# ---------------------------------------------------------------------------
+# duplicate_e2o_relations (Easy/Medium/Hard)
+#
+# Insert extra copies of a real (event, object, qualifier) triple in
+# `event_object`. Event-side mirror of `duplicate_o2o_relations`; the
+# clean fixture also leaves this table PK-less.
+# ---------------------------------------------------------------------------
+
+
+def _insert_e2o_copies(
+    conn: sqlite3.Connection, ev: str, obj: str, qual: str, extras: int
+) -> tuple[str, str, str]:
+    for _ in range(extras):
+        conn.execute(
+            "INSERT INTO event_object VALUES (?, ?, ?)",
+            (ev, obj, qual),
+        )
+    return ev, obj, qual
+
+
+def inject_duplicate_e2o_relations_order_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_e2o_relations Easy: a place_order↔order triple gets two
+    extra copies. Order-touching events are the highest-signal edges in
+    the log, so an accidental extra copy sits directly on the critical
+    path."""
+    return _insert_e2o_copies(conn, "place_o-990001", "o-990001", "order", extras=2)
+
+
+def inject_duplicate_e2o_relations_item_medium(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_e2o_relations Medium: a pick_item↔item triple gets two
+    extra copies. Items are the highest-frequency object type in E2O
+    (~61k rows), so the duplicate has to actually hash-match to stand out."""
+    ev = conn.execute(
+        "SELECT ocel_event_id, ocel_object_id "
+        "FROM event_object WHERE ocel_qualifier = 'item' "
+        "AND ocel_event_id LIKE 'pick%' LIMIT 1"
+    ).fetchone()
+    if not ev:
+        return "", "", ""
+    return _insert_e2o_copies(conn, ev[0], ev[1], "item", extras=2)
+
+
+def inject_duplicate_e2o_relations_sales_person_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """duplicate_e2o_relations Hard: a place_order↔sales_person triple
+    gets two extra copies. Hard because `sales person` is a lower-volume
+    qualifier (~2k rows) and multi-rep assignments could look real; the
+    detector still fires because it's the SAME (event, sales_person)
+    edge repeated, not two different reps on one order."""
+    ev = conn.execute(
+        "SELECT ocel_event_id, ocel_object_id "
+        "FROM event_object WHERE ocel_qualifier = 'sales person' LIMIT 1"
+    ).fetchone()
+    if not ev:
+        return "", "", ""
+    return _insert_e2o_copies(conn, ev[0], ev[1], "sales person", extras=2)

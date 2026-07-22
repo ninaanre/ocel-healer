@@ -485,6 +485,94 @@ def detect_duplicate_events_on_attributes(src: SqliteInput) -> pl.DataFrame:
     )
 
 
+def detect_duplicate_o2o_relations(src: SqliteInput) -> pl.DataFrame:
+    """Find `object_object` rows where the same (source, target, qualifier)
+    triple appears more than once.
+
+    Both endpoints resolve to real objects — this is not `dangling_*`.
+    One row is emitted per duplicated triple; `count` is the number of
+    rows sharing that triple.
+    """
+    with _connect(src) as conn:
+        o2o = pl.read_database(
+            "SELECT ocel_source_id, ocel_target_id, ocel_qualifier FROM object_object",
+            conn,
+        )
+
+    o2o = o2o.cast({
+        "ocel_source_id": pl.Utf8,
+        "ocel_target_id": pl.Utf8,
+        "ocel_qualifier": pl.Utf8,
+    })
+
+    cols = ["ocel_source_id", "ocel_target_id", "ocel_qualifier", "count", "issue"]
+    return (
+        o2o
+        .group_by(["ocel_source_id", "ocel_target_id", "ocel_qualifier"])
+        .agg(pl.len().alias("count"))
+        .filter(pl.col("count") > 1)
+        .with_columns(pl.lit("duplicate_o2o_relations").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
+def detect_o2o_self_loop(src: SqliteInput) -> pl.DataFrame:
+    """Find `object_object` rows where source and target reference the
+    same object id — an object linked to itself under a qualifier is
+    structurally illegal for O2O.
+    """
+    with _connect(src) as conn:
+        raw = conn.execute(
+            "SELECT ocel_source_id, ocel_target_id, ocel_qualifier "
+            "FROM object_object "
+            "WHERE ocel_source_id = ocel_target_id"
+        ).fetchall()
+
+    rows = [
+        {
+            "ocel_source_id": src_id,
+            "ocel_target_id": tgt_id,
+            "ocel_qualifier": qual,
+            "issue": "o2o_self_loop",
+        }
+        for (src_id, tgt_id, qual) in raw
+    ]
+    return _frame(
+        rows,
+        ["ocel_source_id", "ocel_target_id", "ocel_qualifier", "issue"],
+    )
+
+
+def detect_duplicate_e2o_relations(src: SqliteInput) -> pl.DataFrame:
+    """Find `event_object` rows where the same (event, object, qualifier)
+    triple appears more than once. Event-side mirror of
+    :func:`detect_duplicate_o2o_relations`.
+    """
+    with _connect(src) as conn:
+        e2o = pl.read_database(
+            "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object",
+            conn,
+        )
+
+    e2o = e2o.cast({
+        "ocel_event_id": pl.Utf8,
+        "ocel_object_id": pl.Utf8,
+        "ocel_qualifier": pl.Utf8,
+    })
+
+    cols = ["ocel_event_id", "ocel_object_id", "ocel_qualifier", "count", "issue"]
+    return (
+        e2o
+        .group_by(["ocel_event_id", "ocel_object_id", "ocel_qualifier"])
+        .agg(pl.len().alias("count"))
+        .filter(pl.col("count") > 1)
+        .with_columns(pl.lit("duplicate_e2o_relations").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
 def detect_missing_object_type(src: SqliteInput) -> pl.DataFrame:
     """Find objects in the main object table whose ocel_type is NULL or
     empty/whitespace."""
@@ -718,6 +806,9 @@ def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
         "duplicate_objects_on_attributes":      detect_duplicate_objects_on_attributes(src),
         "duplicate_events_on_ids":              detect_duplicate_events_on_ids(src),
         "duplicate_events_on_attributes":       detect_duplicate_events_on_attributes(src),
+        "duplicate_o2o_relations":              detect_duplicate_o2o_relations(src),
+        "o2o_self_loop":                        detect_o2o_self_loop(src),
+        "duplicate_e2o_relations":              detect_duplicate_e2o_relations(src),
         "incorrect_attribute_datatype":         detect_incorrect_attribute_datatype(src),
         "incorrect_event_attribute_datatype":   detect_incorrect_event_attribute_datatype(src),
         "dangling_o2o_relationship":            detect_dangling_o2o_relationship(src),
