@@ -80,20 +80,47 @@ def issue_labels():
         "dangling_e2o_relationship":         "Missing Event-to-Object",
         "duplicate_objects_on_ids":          "Incorrect Object (by ID)",
         "duplicate_objects_on_attributes":   "Incorrect Object (by attributes)",
+        "duplicate_events_on_ids":           "Incorrect Event (by ID)",
+        "duplicate_events_on_attributes":    "Incorrect Event (by attributes)",
         "incorrect_object_type":             "Incorrect Object Type",
+        "incorrect_event_type":              "Incorrect Event Type",
+        "incorrect_event_time":              "Incorrect Event Time",
         "incorrect_attribute_datatype":      "Incorrect Object Attribute Type",
         "incorrect_attribute_value":         "Incorrect Object Attribute Value",
         "incorrect_event_attribute_datatype": "Incorrect Event Attribute Type",
         "incorrect_event_attribute_value":    "Incorrect Event Attribute Value",
     }
-    # Synthetic sentinel for the merged N6 cell (paper §4.2), which spans
-    # both duplicate detectors under a single "Incorrect Object" heading.
-    # DRILL_LABELS extends ISSUE_LABELS with the sentinel so the drill-in
+    # Synthetic sentinels for merged cells (paper §4.2). Each sentinel spans
+    # two detectors under a single "Incorrect …" heading:
+    #   N6_MERGED_KEY  — objects: id-duplicates + attribute-duplicates.
+    #   DUP_EVENTS_MERGED_KEY — events: same pair, event-side (paper I6 mirror).
+    # DRILL_LABELS extends ISSUE_LABELS with the sentinels so the drill-in
     # section header renders the paper label rather than the raw key.
+    # MERGED_KEYS is the (sentinel, sub_keys) table consumed by
+    # overview_meta / overview_selector_resolve / drill_router so those
+    # cells stay data-driven as more merges are added.
     N6_MERGED_KEY = "__n6_incorrect_object"
     N6_SUB_KEYS = ["duplicate_objects_on_ids", "duplicate_objects_on_attributes"]
-    DRILL_LABELS = {**ISSUE_LABELS, N6_MERGED_KEY: "Incorrect Object"}
-    return DRILL_LABELS, ISSUE_LABELS, N6_MERGED_KEY, N6_SUB_KEYS
+    DUP_EVENTS_MERGED_KEY = "__i6_incorrect_event"
+    DUP_EVENTS_SUB_KEYS = ["duplicate_events_on_ids", "duplicate_events_on_attributes"]
+    MERGED_KEYS: list[tuple[str, list[str]]] = [
+        (N6_MERGED_KEY, N6_SUB_KEYS),
+        (DUP_EVENTS_MERGED_KEY, DUP_EVENTS_SUB_KEYS),
+    ]
+    DRILL_LABELS = {
+        **ISSUE_LABELS,
+        N6_MERGED_KEY: "Incorrect Object",
+        DUP_EVENTS_MERGED_KEY: "Incorrect Event",
+    }
+    return (
+        DRILL_LABELS,
+        DUP_EVENTS_MERGED_KEY,
+        DUP_EVENTS_SUB_KEYS,
+        ISSUE_LABELS,
+        MERGED_KEYS,
+        N6_MERGED_KEY,
+        N6_SUB_KEYS,
+    )
 
 
 @app.cell
@@ -461,7 +488,7 @@ def overview_config():
     # Static schema for the overview grid. Kept in its own cell so both
     # `overview_meta` and `overview_layout` see identical rows/columns
     # without duplicating the constants.
-    rows = ["Missing Data", "Incorrect Data", "Imprecise Data", "Irrelevant Data"]
+    rows = ["Missing Data", "Incorrect Data"]
 
     # Columns follow paper Table 3 (Basmer et al.): three OCED dimensions —
     # Events, Objects, Relations — with the columns inside each group listed
@@ -507,6 +534,13 @@ def overview_config():
 
         # Incorrect Data — N6 (paper §4.2) covers "erroneous duplicate" objects,
         # which is why both duplicate detectors live in a single cell here.
+        # The event-side mirror (`DUP_EVENTS_MERGED_KEY`) follows the same
+        # collapse pattern for the "Incorrect Data / Event" cell.
+        ("Incorrect Data", "Event"):            [                                 # I6 (event-side mirror of N6)
+            "duplicate_events_on_ids", "duplicate_events_on_attributes",
+        ],
+        ("Incorrect Data", "Event Type"):                ["incorrect_event_type"],        # I7 mirror
+        ("Incorrect Data", "Event Time"):                ["incorrect_event_time"],        # (LLM-only)
         ("Incorrect Data", "Object"):           [                                 # N6
             "duplicate_objects_on_ids", "duplicate_objects_on_attributes",
         ],
@@ -519,14 +553,21 @@ def overview_config():
     # Cells that are intentionally not applicable rather than merely
     # unmapped — a missing value has no declared datatype, so the
     # "Missing / *Attribute Type" cells can't have any content by
-    # construction. Rendered as an `N/A` badge distinct from the blank
-    # dash used for unmapped cells.
+    # construction. The schema-level "Incorrect / *Attribute" cells are
+    # also N/A: an attribute column that neither belongs on its type nor
+    # spells its role correctly is a schema authoring problem, not a
+    # data-quality issue the healer touches. Rendered as an `N/A` badge
+    # distinct from the blank dash used for unmapped cells.
     na_cells = {
         ("Missing Data", "Event Attribute Type"),
         ("Missing Data", "Object Attribute Type"),
+        ("Incorrect Data", "Object Attribute"),
+        ("Incorrect Data", "Event Attribute"),
     }
     llm_detected_keys = {
         "incorrect_object_type",
+        "incorrect_event_type",
+        "incorrect_event_time",
         "incorrect_attribute_value",
         "incorrect_event_attribute_value",
         "missing_object_attribute",
@@ -537,7 +578,7 @@ def overview_config():
 
 @app.cell
 def overview_meta(
-    N6_MERGED_KEY,
+    MERGED_KEYS,
     cols_flat,
     get_flags,
     get_sweep_ran,
@@ -566,8 +607,8 @@ def overview_meta(
     Cells listed in `na_cells` have kind == "na" (rendered as an N/A badge —
     intentionally not applicable, e.g. datatype-of-a-missing-value cells).
     Interactive cells that resolve to a single detector store its
-    issue_key; the N6 duplicate pair collapses into the synthetic
-    `N6_MERGED_KEY` sentinel that drill_router already knows how to expand.
+    issue_key; multi-key cells collapse into a synthetic merged sentinel
+    from MERGED_KEYS that drill_router knows how to expand.
     """
     # Bucket confirmed-flag counts by issue key so each LLM cell reads only
     # its own count. Flags are keyed (sqlite_path, issue_key, ocel_id, extra);
@@ -604,12 +645,13 @@ def overview_meta(
         return ("count", total)
 
     def _issue_key_for(keys):
-        # A cell may map to 1 issue key or (for N6) 2. Store the single key
-        # directly; store the synthetic merged sentinel for the pair.
+        # A cell may map to 1 issue key or (for a merged sentinel) 2+. Store
+        # the single key directly; look the multi-key set up in MERGED_KEYS.
         if len(keys) == 1:
             return keys[0]
-        if set(keys) == {"duplicate_objects_on_ids", "duplicate_objects_on_attributes"}:
-            return N6_MERGED_KEY
+        for sentinel, sub_keys in MERGED_KEYS:
+            if set(keys) == set(sub_keys):
+                return sentinel
         # Fallback — shouldn't happen with today's mapping.
         return keys[0]
 
@@ -805,8 +847,7 @@ def overview_column_selector(
 
 @app.cell
 def overview_selector_resolve(
-    N6_MERGED_KEY,
-    N6_SUB_KEYS,
+    MERGED_KEYS,
     col_picker_widget,
     get_selected_issue,
     mapping,
@@ -826,8 +867,9 @@ def overview_selector_resolve(
             return None
         if len(keys) == 1:
             return keys[0]
-        if set(keys) == set(N6_SUB_KEYS):
-            return N6_MERGED_KEY
+        for sentinel, sub_keys in MERGED_KEYS:
+            if set(keys) == set(sub_keys):
+                return sentinel
         return keys[0]
 
     if _row is None or _col is None:
@@ -852,8 +894,7 @@ def overview_selector_resolve(
 
 @app.cell
 def drill_router(
-    N6_MERGED_KEY,
-    N6_SUB_KEYS,
+    MERGED_KEYS,
     get_flags,
     get_selected_issue,
     get_sweep_ran,
@@ -866,6 +907,8 @@ def drill_router(
     def _rule_row_count(key):
         return results[key].height if key in results else 0
 
+    _merged_lookup = {sentinel: list(sub_keys) for sentinel, sub_keys in MERGED_KEYS}
+
     ctx = {
         "mode": "empty",
         "issue_key": _issue_key,
@@ -874,10 +917,11 @@ def drill_router(
     }
     if _issue_key is None:
         pass
-    elif _issue_key == N6_MERGED_KEY:
-        _total = sum(_rule_row_count(k) for k in N6_SUB_KEYS)
+    elif _issue_key in _merged_lookup:
+        _sub_keys = _merged_lookup[_issue_key]
+        _total = sum(_rule_row_count(k) for k in _sub_keys)
         ctx["mode"] = "rule" if _total > 0 else "rule_empty"
-        ctx["sub_keys"] = list(N6_SUB_KEYS)
+        ctx["sub_keys"] = list(_sub_keys)
         ctx["n_rows"] = _total
     elif _issue_key in llm_detected_keys:
         _n_flags = sum(
@@ -1469,7 +1513,7 @@ def drill_rule_source(ctx, get_flags, results, sqlite_path):
 @app.cell
 def drill_rule_render(
     ISSUE_LABELS,
-    N6_MERGED_KEY,
+    MERGED_KEYS,
     PAGE_SIZE,
     ctx,
     dr,
@@ -1484,8 +1528,8 @@ def drill_rule_render(
     are only in `source_rows` after the user confirmed them in the LLM
     proposal panel above. So this table has no per-row controls: every
     visible row is fix-eligible, and row selection happens in the
-    searchable "Row" dropdown below. For the merged N6 case two stacked
-    panels are shown, one per sub-detector.
+    searchable "Row" dropdown below. Merged cells (paper N6 objects, I6
+    events) render as stacked sub-panels, one per underlying detector.
     """
     if ctx["mode"] == "empty":
         rule_view = None
@@ -1561,7 +1605,7 @@ def drill_rule_render(
                 _panel_body_parts.append(_pager)
             _panel_body = mo.vstack(_panel_body_parts, gap=0.25)
 
-            if ctx["issue_key"] == N6_MERGED_KEY:
+            if ctx["issue_key"] in {sentinel for sentinel, _ in MERGED_KEYS}:
                 _sub_label = ISSUE_LABELS.get(_src_key, _src_key)
                 _panel = mo.vstack([
                     mo.Html(
