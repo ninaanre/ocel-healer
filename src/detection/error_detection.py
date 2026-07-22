@@ -419,6 +419,72 @@ def detect_duplicate_objects_on_attributes(src: SqliteInput) -> pl.DataFrame:
     )
 
 
+def detect_duplicate_events_on_ids(src: SqliteInput) -> pl.DataFrame:
+    """Find ocel_ids that appear more than once in the main event table.
+
+    Direct event-side mirror of :func:`detect_duplicate_objects_on_ids`.
+    One row is emitted per duplicated ocel_id; ``ocel_types`` lists every
+    event type value seen for that id (comma-separated) and ``count`` is
+    the number of duplicate rows.
+    """
+    with _connect(src) as conn:
+        events = pl.read_database("SELECT ocel_id, ocel_type FROM event", conn)
+
+    cols = ["ocel_id", "ocel_types", "count", "issue"]
+    return (
+        events
+        .group_by("ocel_id")
+        .agg(
+            pl.len().alias("count"),
+            pl.col("ocel_type").unique().sort().str.join(", ").alias("ocel_types"),
+        )
+        .filter(pl.col("count") > 1)
+        .with_columns(pl.lit("duplicate_events_on_ids").alias("issue"))
+        .select(cols)
+        .cast({c: pl.Utf8 for c in cols})
+    )
+
+
+def detect_duplicate_events_on_attributes(src: SqliteInput) -> pl.DataFrame:
+    """Find events within the same type-table that share identical attribute
+    values but carry different ocel_ids.
+
+    Direct event-side mirror of :func:`detect_duplicate_objects_on_attributes`.
+    One row is emitted per duplicate group; ``ocel_ids`` lists every id
+    that shares the same attribute fingerprint (comma-separated).
+    """
+    with _connect(src) as conn:
+        rows: list[dict] = []
+        for ocel_type, table in _event_type_tables(conn):
+            attr_cols = [c for c, _ in _column_info(conn, table)]
+            if not attr_cols:
+                continue
+            quoted = ", ".join(f'"{c}"' for c in attr_cols)
+            raw = conn.execute(
+                f'SELECT ocel_id, {quoted} FROM "{table}"'
+            ).fetchall()
+
+            groups: dict[tuple, list[str]] = {}
+            for ocel_id, *values in raw:
+                key = tuple(values)
+                groups.setdefault(key, []).append(ocel_id)
+
+            for key, ids in groups.items():
+                if len(ids) < 2:
+                    continue
+                rows.append({
+                    "event_type": ocel_type,
+                    "ocel_ids": ", ".join(ids),
+                    "duplicate_count": str(len(ids)),
+                    "attribute_values": str(dict(zip(attr_cols, key))),
+                    "issue": "duplicate_events_on_attributes",
+                })
+    return _frame(
+        rows,
+        ["event_type", "ocel_ids", "duplicate_count", "attribute_values", "issue"],
+    )
+
+
 def detect_missing_object_type(src: SqliteInput) -> pl.DataFrame:
     """Find objects in the main object table whose ocel_type is NULL or
     empty/whitespace."""
@@ -650,6 +716,8 @@ def detect_all(src: SqliteInput) -> dict[str, pl.DataFrame]:
         "missing_event_attribute_value":        detect_missing_event_attribute_value(src),
         "duplicate_objects_on_ids":             detect_duplicate_objects_on_ids(src),
         "duplicate_objects_on_attributes":      detect_duplicate_objects_on_attributes(src),
+        "duplicate_events_on_ids":              detect_duplicate_events_on_ids(src),
+        "duplicate_events_on_attributes":       detect_duplicate_events_on_attributes(src),
         "incorrect_attribute_datatype":         detect_incorrect_attribute_datatype(src),
         "incorrect_event_attribute_datatype":   detect_incorrect_event_attribute_datatype(src),
         "dangling_o2o_relationship":            detect_dangling_o2o_relationship(src),
