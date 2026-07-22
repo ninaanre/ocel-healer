@@ -167,6 +167,11 @@ def detect_dangling_o2o_relationship(src: SqliteInput) -> pl.DataFrame:
             conn,
         )
 
+    # An empty `object_object` table (common on logs upcast from OCEL 1.0)
+    # comes back with `Null`-typed columns, which then fail to join against
+    # the Utf8 `ocel_id` on the object side. Force the id cols to Utf8.
+    o2o = o2o.cast({"ocel_source_id": pl.Utf8, "ocel_target_id": pl.Utf8})
+
     # Dedup: the object table can legitimately list the same id twice in this dataset.
     known = objects.unique(subset=["ocel_id"])
     # `_exists` sentinels distinguish "object row absent" (dangling) from
@@ -445,6 +450,10 @@ def detect_dangling_e2o_relationship(src: SqliteInput) -> pl.DataFrame:
         )
         events  = pl.read_database("SELECT ocel_id, ocel_type FROM event",  conn).unique(subset=["ocel_id"])
         objects = pl.read_database("SELECT ocel_id, ocel_type FROM object", conn).unique(subset=["ocel_id"])
+
+    # An empty `event_object` table would come back with `Null`-typed
+    # columns and blow up the joins below. Force the id cols to Utf8.
+    e2o = e2o.cast({"ocel_event_id": pl.Utf8, "ocel_object_id": pl.Utf8})
 
     # `_exists` sentinels let us distinguish "row absent from parent table"
     # (dangling) from "row present but ocel_type IS NULL" (a separate issue,
