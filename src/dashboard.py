@@ -344,6 +344,30 @@ def expert_state(mo):
     return get_flags, get_sweep_ran, set_flags, set_sweep_ran
 
 
+@app.cell
+def sweep_result_state(mo):
+    # Persistent per-sweep results, keyed by (sqlite_path, issue_key,
+    # ocel_type). Value shape:
+    #   {"proposals":     list[{"row": dict, "verdict": Verdict}],
+    #    "summary_text":  str (markdown-ready),
+    #    "dismissed":     set[str],   # ocel_id strings
+    #    "total_judged":  int,
+    #    "flagged_count": int,
+    #    "chosen_type":   str,
+    #    "order":         int}
+    # `order` fixes per-type vertical position at first sweep so re-runs
+    # don't reshuffle blocks. Kept in its own state so `set_sweep_result`
+    # can atomically overwrite one key's entry without a race.
+    get_sweep_result, set_sweep_result = mo.state({})
+    get_sweep_ordinal, set_sweep_ordinal = mo.state(0)
+    return (
+        get_sweep_ordinal,
+        get_sweep_result,
+        set_sweep_ordinal,
+        set_sweep_result,
+    )
+
+
 # ── Issue Overview (Basmer et al. Table 3 grid) ──────────────────────────
 #
 # Split into four cells so marimo's "no reading own value" rule holds:
@@ -724,9 +748,11 @@ def drill_llm_controls(
     mo,
     sqlite_path,
 ):
-    """Object-type picker + Run button. Only used when the selected issue
-    is an LLM-detected key that hasn't been confirmed yet."""
-    if ctx["mode"] != "llm_pending":
+    """Object-type picker + Run button. Available in ``llm_pending`` AND
+    ``llm_with_flags`` — the mode transitions to ``llm_with_flags`` after
+    the first Confirm, but the user may still want to run sweeps on other
+    object types."""
+    if ctx["mode"] not in ("llm_pending", "llm_with_flags"):
         # Widgets must still exist so downstream cells can read them, but
         # they don't need to be usable.
         type_picker = mo.ui.dropdown(options=[], label="Object type")
@@ -747,25 +773,80 @@ def drill_llm_controls(
 
 
 @app.cell
+def drill_shell_top(
+    DRILL_LABELS,
+    ctx,
+    detect_btn,
+    mo,
+    swept_types,
+    type_picker,
+):
+    """Top half of the drill subsection: header + LLM controls (when in
+    LLM mode) + a "Swept so far" affordance summarising which object
+    types have already been checked. Rendered above ``drill_llm_sweep``
+    in source order so the sweep cell's progress-bar slot lands
+    immediately below this cell's output — inside the subsection, not
+    between the overview and the header."""
+    if ctx["mode"] == "empty":
+        _top = mo.md("")   # empty mode is handled by drill_shell_bottom's callout
+    else:
+        _label = DRILL_LABELS.get(ctx["issue_key"], ctx["issue_key"])
+        _header = mo.Html(
+            '<div style="margin:24px 0 12px 0; padding-bottom:8px; '
+            'border-bottom:1px solid #d0d7de;">'
+            f'<div style="font-size:20px; font-weight:700; color:#1f2328; '
+            f'letter-spacing:-0.01em;">{_label}</div>'
+            f'<div style="margin-top:4px; color:#57606a; font-size:13px;">'
+            f'Detected rows (treated as ground truth), followed by the fix '
+            f'area.</div>'
+            '</div>'
+        )
+        _parts: list = [_header]
+
+        if ctx["mode"] in ("llm_pending", "llm_with_flags"):
+            _parts.append(mo.hstack([type_picker, detect_btn], justify="start", gap=1))
+            if swept_types:
+                _bits = ", ".join(
+                    f"`{_t}` ({_flagged}/{_total} flagged)"
+                    for _t, _total, _flagged, _summary in swept_types
+                )
+                _parts.append(mo.md(
+                    f"**Swept so far:** {_bits}. Pick another type to sweep, "
+                    f"or re-select a swept type to re-run it."
+                ))
+        _top = mo.vstack(_parts, gap=0.5)
+    _top
+    return
+
+
+@app.cell
 def drill_llm_sweep(
     connect_sqlite,
     ctx,
     detect_all_with_llm,
     detect_btn,
+    get_sweep_ordinal,
     get_sweep_ran,
+    get_sweep_result,
     mo,
+    set_sweep_ordinal,
     set_sweep_ran,
+    set_sweep_result,
     sqlite_path,
     type_picker,
 ):
-    """Run the LLM sweep for the selected issue's key. Progress bar +
-    summary come out the far side; confirmed flags are agreed to below."""
-    proposals: list = []
-    sweep_summary = None
-    _issue_key = ctx["issue_key"]
+    """Run the LLM sweep for the selected type. Writes the resulting
+    entry into ``get_sweep_result`` keyed by (path, issue_key, type) so
+    the panel below can render it on subsequent reactive cycles — after
+    ``detect_btn.value`` has flipped back to falsy.
 
+    The progress bar is opened here so its live output slot renders in
+    this cell's position. Cell source order is arranged so this slot
+    lands between the drill subsection header/controls (drill_shell_top)
+    and the proposal cards / rule table / fix stack (drill_shell_bottom)."""
+    _issue_key = ctx["issue_key"]
     if (
-        ctx["mode"] == "llm_pending"
+        ctx["mode"] in ("llm_pending", "llm_with_flags")
         and detect_btn.value
         and type_picker.value
         and _issue_key is not None
@@ -783,10 +864,11 @@ def drill_llm_sweep(
             for (_oid,) in _ids
         ]
         total = len(candidates)
+
+        _proposals: list = []
         if total == 0:
-            sweep_summary = mo.md(
-                f"No objects found for type **`{chosen_type}`**."
-            ).callout(kind="warn")
+            _summary_text = f"No objects found for type `{chosen_type}`."
+            _verdict_count = 0
         else:
             flagged_count = [0]
 
@@ -811,25 +893,84 @@ def drill_llm_sweep(
                 )
             for _row, _verdict in verdicts:
                 if _verdict.flagged:
-                    proposals.append({"row": dict(_row), "verdict": _verdict})
-            sweep_summary = mo.md(
-                f"Judged **{len(verdicts)}** `{chosen_type}` object(s) → "
-                f"**{len(proposals)}** proposed flag(s)."
-            ).callout(kind="info" if proposals else "success")
-            _marker = (sqlite_path, _issue_key)
-            _ran = set(get_sweep_ran())
-            if _marker not in _ran:
-                _ran.add(_marker)
-                set_sweep_ran(_ran)
-    return proposals, sweep_summary
+                    _proposals.append({"row": dict(_row), "verdict": _verdict})
+            _verdict_count = len(verdicts)
+            _summary_text = (
+                f"Judged **{_verdict_count}** `{chosen_type}` object(s) → "
+                f"**{len(_proposals)}** proposed flag(s)."
+            )
+
+        _key = (sqlite_path, _issue_key, chosen_type)
+        _all = dict(get_sweep_result())
+        # Preserve first-sweep vertical position on re-runs of the same type;
+        # fresh types get the next ordinal.
+        _existing = _all.get(_key)
+        if _existing is not None:
+            _order = _existing["order"]
+        else:
+            _order = get_sweep_ordinal() + 1
+            set_sweep_ordinal(_order)
+        _all[_key] = {
+            "proposals":     _proposals,
+            "summary_text":  _summary_text,
+            "dismissed":     set(),   # re-sweep resets dismissals (per plan)
+            "total_judged":  _verdict_count,
+            "flagged_count": len(_proposals),
+            "chosen_type":   chosen_type,
+            "order":         _order,
+        }
+        set_sweep_result(_all)
+
+        _marker = (sqlite_path, _issue_key)
+        _ran = set(get_sweep_ran())
+        if _marker not in _ran:
+            _ran.add(_marker)
+            set_sweep_ran(_ran)
+    return
 
 
 @app.cell
-def drill_llm_confirm_buttons(mo, proposals):
+def drill_llm_proposals(ctx, get_sweep_result, sqlite_path):
+    """Aggregate persisted sweep entries for the current
+    (sqlite_path, issue_key) across all swept types.
+
+    ``proposals_all`` is a flat list — each entry gets a denormalized
+    ``ocel_type`` field so downstream cells (buttons, renderer, observers)
+    can trace it back to the right sweep entry. Order is by first-sweep
+    ordinal, then by ocel_id within a type, for stable card positions.
+
+    ``swept_types`` is a list of ``(ocel_type, total_judged, flagged_count,
+    summary_text)`` in first-sweep order, driving the summary line and the
+    swept-so-far affordance."""
+    proposals_all: list = []
+    swept_types: list = []
+    _issue_key = ctx["issue_key"]
+    if _issue_key is not None:
+        _matches = [
+            (k, v) for k, v in get_sweep_result().items()
+            if k[0] == sqlite_path and k[1] == _issue_key
+        ]
+        _matches.sort(key=lambda kv: kv[1]["order"])
+        for (_p, _ik, _t), _entry in _matches:
+            swept_types.append(
+                (_t, _entry["total_judged"], _entry["flagged_count"],
+                 _entry["summary_text"])
+            )
+            _sorted_props = sorted(
+                _entry["proposals"],
+                key=lambda p: p["row"].get("ocel_id", "") or "",
+            )
+            for _p in _sorted_props:
+                proposals_all.append({**_p, "ocel_type": _t})
+    return proposals_all, swept_types
+
+
+@app.cell
+def drill_llm_confirm_buttons(mo, proposals_all):
     """Per-proposal Confirm/Dismiss buttons — mirrors the old
     expert_detection_buttons split (widgets here, values read downstream)."""
-    if proposals:
-        _n = len(proposals)
+    if proposals_all:
+        _n = len(proposals_all)
         agree_array = mo.ui.array([
             mo.ui.button(value=0, on_click=lambda v: v + 1, label="Confirm")
             for _ in range(_n)
@@ -849,60 +990,74 @@ def drill_llm_confirm_render(
     agree_array,
     ctx,
     get_flags,
+    get_sweep_result,
     mo,
-    proposals,
+    proposals_all,
     reject_array,
     sqlite_path,
-    sweep_summary,
+    swept_types,
 ):
-    """Render the sweep summary + per-proposal cards. Nothing when we're
-    not in an LLM-pending or LLM-with-flags mode."""
+    """Render one summary line per swept type followed by any un-actioned
+    proposal cards for that type. Confirmed proposals (present in
+    ``get_flags``) are dropped entirely; dismissed proposals (present in
+    the sweep entry's ``dismissed`` set) are also dropped."""
     llm_view = None
-    if ctx["mode"] in ("llm_pending", "llm_with_flags") and proposals:
-        cards = []
+    if ctx["mode"] in ("llm_pending", "llm_with_flags") and swept_types:
         current_flags = get_flags()
-        for _i, _prop in enumerate(proposals):
-            _row = _prop["row"]
-            _v = _prop["verdict"]
-            _ocel_id = _row["ocel_id"]
-            _key = (sqlite_path, _ocel_id)
-            if reject_array is not None and reject_array[_i].value:
-                continue
-            _already = _key in current_flags
-            _bar_pct = int(round(_v.confidence * 100))
-            _header = mo.Html(
-                "<div style='font-family:system-ui; padding:6px 0;'>"
-                f"<div><b>ocel_id:</b> <code>{_ocel_id}</code></div>"
-                f"<div style='margin:4px 0'>"
-                f"<b>Current:</b> <span style='background:#fde2e2; color:#b00020; "
-                f"padding:1px 6px; border-radius:3px;'>{_row.get('ocel_type')}</span>"
-                f" &nbsp;→&nbsp; "
-                f"<b>Suggested:</b> <span style='background:#e6ffec; color:#1a7f37; "
-                f"padding:1px 6px; border-radius:3px;'>{_v.suggested_value}</span>"
-                f"</div>"
-                f"<div><b>Rationale:</b> {_v.rationale}</div>"
-                f"<div style='margin-top:4px'><b>Confidence:</b> {_v.confidence:.2f}"
-                f" <span style='display:inline-block; background:#eee; border-radius:4px; "
-                f"width:160px; height:8px; vertical-align:middle; margin-left:6px;'>"
-                f"<span style='display:block; background:#0969da; width:{_bar_pct}%; "
-                f"height:8px; border-radius:4px;'></span></span></div>"
-                "</div>"
-            )
-            if _already:
-                _controls = mo.md(
-                    "**Confirmed** — appears in the detection table below."
-                ).callout(kind="success")
-            else:
+        _sweep_all = get_sweep_result()
+        _issue_key = ctx["issue_key"]
+
+        # Group proposals by ocel_type so each type's cards render under
+        # its own summary line.
+        _by_type: dict[str, list[tuple[int, dict]]] = {}
+        for _i, _prop in enumerate(proposals_all):
+            _by_type.setdefault(_prop["ocel_type"], []).append((_i, _prop))
+
+        _parts: list = []
+        for _t, _total, _flagged, _summary_text in swept_types:
+            _kind = "info" if _flagged else "success"
+            _parts.append(mo.md(_summary_text).callout(kind=_kind))
+            _entry = _sweep_all.get((sqlite_path, _issue_key, _t)) or {}
+            _dismissed = _entry.get("dismissed", set())
+            _cards: list = []
+            for _i, _prop in _by_type.get(_t, []):
+                _row = _prop["row"]
+                _v = _prop["verdict"]
+                _ocel_id = _row["ocel_id"]
+                if (sqlite_path, _ocel_id) in current_flags:
+                    continue   # confirmed → removed entirely
+                if _ocel_id in _dismissed:
+                    continue   # dismissed → hidden
+                _bar_pct = int(round(_v.confidence * 100))
+                _header = mo.Html(
+                    "<div style='font-family:system-ui; padding:6px 0;'>"
+                    f"<div><b>ocel_id:</b> <code>{_ocel_id}</code></div>"
+                    f"<div style='margin:4px 0'>"
+                    f"<b>Current:</b> <span style='background:#fde2e2; color:#b00020; "
+                    f"padding:1px 6px; border-radius:3px;'>{_row.get('ocel_type')}</span>"
+                    f" &nbsp;→&nbsp; "
+                    f"<b>Suggested:</b> <span style='background:#e6ffec; color:#1a7f37; "
+                    f"padding:1px 6px; border-radius:3px;'>{_v.suggested_value}</span>"
+                    f"</div>"
+                    f"<div><b>Rationale:</b> {_v.rationale}</div>"
+                    f"<div style='margin-top:4px'><b>Confidence:</b> {_v.confidence:.2f}"
+                    f" <span style='display:inline-block; background:#eee; border-radius:4px; "
+                    f"width:160px; height:8px; vertical-align:middle; margin-left:6px;'>"
+                    f"<span style='display:block; background:#0969da; width:{_bar_pct}%; "
+                    f"height:8px; border-radius:4px;'></span></span></div>"
+                    "</div>"
+                )
                 _controls = mo.hstack(
                     [agree_array[_i], reject_array[_i]],
                     justify="start",
                     gap=0.5,
                 )
-            cards.append(mo.vstack([_header, _controls], gap=0.25))
-            cards.append(mo.md("---"))
-        llm_view = mo.vstack([sweep_summary or mo.md(""), *cards], gap=0.5)
+                _cards.append(mo.vstack([_header, _controls], gap=0.25))
+                _cards.append(mo.md("---"))
+            _parts.extend(_cards)
+        llm_view = mo.vstack(_parts, gap=0.5)
     elif ctx["mode"] == "llm_pending":
-        llm_view = sweep_summary or mo.md(
+        llm_view = mo.md(
             "_Pick an object type and click **Run detection** to start a sweep._"
         )
     return (llm_view,)
@@ -910,17 +1065,17 @@ def drill_llm_confirm_render(
 
 @app.cell
 def drill_llm_agree_observer(
-    agree_array, ctx, get_flags, proposals, set_flags, sqlite_path,
+    agree_array, ctx, get_flags, proposals_all, set_flags, sqlite_path,
 ):
     """When a Confirm button is clicked, add the proposal to get_flags()."""
     if (
         ctx["mode"] in ("llm_pending", "llm_with_flags")
-        and proposals
+        and proposals_all
         and agree_array is not None
     ):
         current = dict(get_flags())
         changed = False
-        for _i, _prop in enumerate(proposals):
+        for _i, _prop in enumerate(proposals_all):
             _row = _prop["row"]
             _v = _prop["verdict"]
             _key = (sqlite_path, _row["ocel_id"])
@@ -936,6 +1091,46 @@ def drill_llm_agree_observer(
                 changed = True
         if changed:
             set_flags(current)
+    return
+
+
+@app.cell
+def drill_llm_reject_observer(
+    ctx,
+    get_sweep_result,
+    proposals_all,
+    reject_array,
+    set_sweep_result,
+    sqlite_path,
+):
+    """When a Dismiss button is clicked, add the proposal's ocel_id to
+    the sweep entry's ``dismissed`` set so it stays hidden across
+    subsequent reactive cycles (``reject_array[i].value`` is ephemeral
+    and unusable as a source of truth on its own)."""
+    if (
+        ctx["mode"] in ("llm_pending", "llm_with_flags")
+        and proposals_all
+        and reject_array is not None
+    ):
+        _issue_key = ctx["issue_key"]
+        _all = dict(get_sweep_result())
+        _changed = False
+        for _i, _prop in enumerate(proposals_all):
+            if not reject_array[_i].value:
+                continue
+            _ocel_id = _prop["row"]["ocel_id"]
+            _t = _prop["ocel_type"]
+            _key = (sqlite_path, _issue_key, _t)
+            _entry = _all.get(_key)
+            if _entry is None:
+                continue
+            if _ocel_id in _entry["dismissed"]:
+                continue
+            _new_dismissed = set(_entry["dismissed"]) | {_ocel_id}
+            _all[_key] = {**_entry, "dismissed": _new_dismissed}
+            _changed = True
+        if _changed:
+            set_sweep_result(_all)
     return
 
 
@@ -1311,39 +1506,26 @@ def drill_fix_apply(
 # ── Drill-in shell (the single visible container below the overview) ────
 
 @app.cell
-def drill_shell(
-    DRILL_LABELS,
+def drill_shell_bottom(
     apply_view,
     ctx,
-    detect_btn,
     fix_buttons_view,
     llm_view,
     mo,
     row_picker_view,
     rule_view,
     suggest_view,
-    type_picker,
 ):
+    """Bottom half of the drill subsection: LLM proposal cards +
+    rule/LLM-with-flags detection table + fix area. Sits below
+    ``drill_llm_sweep`` in source order so the progress bar renders
+    between this and the header/controls above."""
     if ctx["mode"] == "empty":
-        _shell = mo.md(
+        _bottom = mo.md(
             "_Pick a category and issue in the dropdowns above to drill in._"
         ).callout(kind="neutral")
     else:
-        _label = DRILL_LABELS.get(ctx["issue_key"], ctx["issue_key"])
-        _header = mo.Html(
-            '<div style="margin:24px 0 12px 0; padding-bottom:8px; '
-            'border-bottom:1px solid #d0d7de;">'
-            f'<div style="font-size:20px; font-weight:700; color:#1f2328; '
-            f'letter-spacing:-0.01em;">{_label}</div>'
-            f'<div style="margin-top:4px; color:#57606a; font-size:13px;">'
-            f'Detected rows (treated as ground truth), followed by the fix '
-            f'area.</div>'
-            '</div>'
-        )
-        _parts: list = [_header]
-
-        if ctx["mode"] == "llm_pending":
-            _parts.append(mo.hstack([type_picker, detect_btn], justify="start", gap=1))
+        _parts: list = []
 
         # LLM sweep summary + proposal cards (only rendered in LLM modes).
         if llm_view is not None:
@@ -1364,8 +1546,8 @@ def drill_shell(
             _fix_stack.append(apply_view)
         _parts.append(mo.vstack(_fix_stack, gap=0.5))
 
-        _shell = mo.vstack(_parts, gap=0.5)
-    _shell
+        _bottom = mo.vstack(_parts, gap=0.5)
+    _bottom
     return
 
 
