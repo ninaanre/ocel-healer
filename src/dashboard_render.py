@@ -37,18 +37,23 @@ SUMMARY_TH_STYLE = (
     "white-space:nowrap;"
 )
 # Vertical variant used for the 13 dimension-column headers in the overview
-# grid: labels are rotated 180° with `writing-mode:vertical-rl` so they read
-# bottom-up, which lets the column pinch down to header-font-height + a
-# little padding instead of the ~90px each horizontal label needed. Keeps
-# the paper Table 3 orientation intact without overflowing typical laptop
-# widths.
+# grid: the label is wrapped in an inline-block <span> that gets rotated
+# -90° so it reads bottom-to-top. Rotating a span rather than the <th>
+# itself avoids browsers that drop `transform` on table cells. The <th>
+# stays a normal table cell; only its inner span is rotated. Height is
+# fixed so the rotated text has room; the column pinches down to
+# roughly the header-font-height + a little padding.
 SUMMARY_TH_VERTICAL_STYLE = (
     "background:#f6f8fa; border-right:1px solid #d0d7de; "
-    "border-bottom:1px solid #d0d7de; padding:10px 6px; "
-    "font-weight:600; vertical-align:middle; text-align:center; "
-    "white-space:nowrap; "
-    "writing-mode:vertical-rl; transform:rotate(180deg); "
-    "line-height:1.2;"
+    "border-bottom:1px solid #d0d7de; padding:6px 4px; "
+    "font-weight:600; vertical-align:bottom; text-align:center; "
+    "white-space:nowrap; height:120px;"
+)
+# Inner span carrying the rotation. `display:inline-block` is required for
+# `transform` to apply; `rotate(-90deg)` reads bottom-to-top.
+SUMMARY_TH_VERTICAL_SPAN_STYLE = (
+    "display:inline-block; transform:rotate(-90deg); "
+    "transform-origin:center center; white-space:nowrap; line-height:1.2;"
 )
 SUMMARY_CORNER_STYLE = (
     "background:#f6f8fa; border-right:1px solid #d0d7de; "
@@ -109,6 +114,16 @@ PENDING_HTML = (
     'border-radius:10px; font-size:12px; font-weight:700; color:#9a6700; '
     'background:#fff8c5;">?</span>'
 )
+# Cell that is intentionally not applicable (distinct from a blank/dash
+# cell whose detector merely hasn't been implemented yet). Used for
+# `Missing / Obj. Attr. Type` and `Missing / Evt. Attr. Type`: a missing
+# value has no declared datatype, so the datatype-missing cell can't have
+# any content by construction.
+NA_HTML = (
+    '<span title="Not applicable — a missing value has no declared datatype." '
+    'style="display:inline-block; padding:1px 8px; border-radius:10px; '
+    'font-size:12px; font-weight:700; color:#57606a; background:#eaeef2;">N/A</span>'
+)
 
 
 def pill_html(n: int) -> str:
@@ -167,14 +182,17 @@ def render_overview_table_html(
     Layout follows paper Table 3 (Basmer et al.): a corner cell, a
     group-header row spanning Events / Objects / Relations, a column-label
     row, and one body row per entry in `rows`. The 13 dimension column
-    labels are rendered rotated 180° via `writing-mode:vertical-rl` (see
-    `SUMMARY_TH_VERTICAL_STYLE`) so the table fits typical laptop widths
+    labels are rendered bottom-to-top via a `-90°`-rotated inner `<span>`
+    (see `SUMMARY_TH_VERTICAL_STYLE` / `SUMMARY_TH_VERTICAL_SPAN_STYLE`)
+    so the table fits typical laptop widths
     without overflowing horizontally; the group headers stay horizontal
     because their `colspan` gives them room. `cell_meta` is keyed
     "r_idx:c_idx" and carries `{kind, count, row_label, col_label, issue_key}`
     for every cell — the same shape `overview_meta` builds in dashboard.py.
 
     - `kind == "none"` → renders `DASH_HTML`.
+    - `kind == "na"` → renders `NA_HTML` (intentionally not applicable,
+      distinct from `none` which merely means "no detector mapped yet").
     - `kind == "pending"` → renders `PENDING_HTML`.
     - `kind == "count"` → renders `pill_html(count)`.
 
@@ -198,12 +216,18 @@ def render_overview_table_html(
         )
     _group_row = "<tr>" + "".join(_group_cells) + "</tr>"
 
-    # Column-label row: one vertically-rotated <th> per data column. The
-    # group row's rowspan=2 corner cell already covers the row-label
-    # column's slot in this row, so no leading corner cell here.
+    # Column-label row: one <th> per data column, each holding an inline
+    # span that carries the -90° rotation (rotating the span rather than
+    # the cell keeps browsers happy). The group row's rowspan=2 corner
+    # cell already covers the row-label column's slot in this row, so no
+    # leading corner cell here.
     _col_cells = []
     for _c in cols_flat:
-        _col_cells.append(f'<th style="{SUMMARY_TH_VERTICAL_STYLE}">{_c}</th>')
+        _col_cells.append(
+            f'<th style="{SUMMARY_TH_VERTICAL_STYLE}">'
+            f'<span style="{SUMMARY_TH_VERTICAL_SPAN_STYLE}">{_c}</span>'
+            f'</th>'
+        )
     _col_row = "<tr>" + "".join(_col_cells) + "</tr>"
 
     # Body rows.
@@ -224,6 +248,8 @@ def render_overview_table_html(
             )
             if _kind == "none":
                 _content = DASH_HTML
+            elif _kind == "na":
+                _content = NA_HTML
             elif _kind == "pending":
                 _content = PENDING_HTML
             else:
