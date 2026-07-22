@@ -70,9 +70,11 @@ def issue_labels():
         "missing_event":                     "Missing Event",
         "missing_event_type":                "Missing Event Type",
         "missing_event_timestamp":           "Missing Event Time",
+        "missing_event_attribute":           "Missing Event Attribute",
         "missing_event_attribute_value":     "Missing Event Attribute Value",
         "missing_object":                    "Missing Object",
         "missing_object_type":               "Missing Object Type",
+        "missing_object_attribute":          "Missing Object Attribute",
         "missing_attribute_value":           "Missing Object Attribute Value",
         "dangling_o2o_relationship":         "Missing Object-to-Object",
         "dangling_e2o_relationship":         "Missing Event-to-Object",
@@ -410,7 +412,12 @@ def flag_key_helper():
 
     def flag_key(sqlite_path: str, issue_key: str, row: dict) -> tuple:
         _extra = ""
-        if issue_key in ("incorrect_attribute_value", "incorrect_event_attribute_value"):
+        if issue_key in (
+            "incorrect_attribute_value",
+            "incorrect_event_attribute_value",
+            "missing_object_attribute",
+            "missing_event_attribute",
+        ):
             _extra = str(row.get("attribute") or row.get("attribute_name") or "")
         return (sqlite_path, issue_key, str(row.get("ocel_id") or ""), _extra)
 
@@ -484,17 +491,15 @@ def overview_config():
         ("Missing Data",   "Event"):            ["missing_event"],               # I2
         ("Missing Data",   "Event Type"):       ["missing_event_type"],          # I6
         ("Missing Data",   "Event Time"):       ["missing_event_timestamp"],     # I7
+        ("Missing Data",   "Event Attribute"):       ["missing_event_attribute"],       # I9-schema (LLM)
         ("Missing Data",   "Event Attribute Value"): ["missing_event_attribute_value"], # I9 (value)
-        # ("Missing Data", "Event Attribute"):    I9-schema — no detector yet
         # ("Missing Data", "Position"):           I5     — no detector yet
 
         # Objects row
         ("Missing Data",   "Object"):                    ["missing_object"],              # N1
         ("Missing Data",   "Object Type"):               ["missing_object_type"],         # N2
+        ("Missing Data",   "Object Attribute"):          ["missing_object_attribute"],    # N3-schema (LLM)
         ("Missing Data",   "Object Attribute Value"):    ["missing_attribute_value"],     # N3
-        # ("Missing Data", "Object Attribute Type"):     N3-schema — no detector yet
-        #   (a missing value can't be datatype-wrong; missingness lives under
-        #   Object Attribute Value alongside the LLM value check.)
 
         # Relations row
         ("Missing Data",   "Object-to-Object"): ["dangling_o2o_relationship"],   # N4
@@ -511,12 +516,23 @@ def overview_config():
         ("Incorrect Data", "Event Attribute Type"):      ["incorrect_event_attribute_datatype"], # I8a (rule)
         ("Incorrect Data", "Event Attribute Value"):     ["incorrect_event_attribute_value"],    # I8b (LLM)
     }
+    # Cells that are intentionally not applicable rather than merely
+    # unmapped — a missing value has no declared datatype, so the
+    # "Missing / *Attribute Type" cells can't have any content by
+    # construction. Rendered as an `N/A` badge distinct from the blank
+    # dash used for unmapped cells.
+    na_cells = {
+        ("Missing Data", "Event Attribute Type"),
+        ("Missing Data", "Object Attribute Type"),
+    }
     llm_detected_keys = {
         "incorrect_object_type",
         "incorrect_attribute_value",
         "incorrect_event_attribute_value",
+        "missing_object_attribute",
+        "missing_event_attribute",
     }
-    return col_groups, cols_flat, llm_detected_keys, mapping, rows
+    return col_groups, cols_flat, llm_detected_keys, mapping, na_cells, rows
 
 
 @app.cell
@@ -527,6 +543,7 @@ def overview_meta(
     get_sweep_ran,
     llm_detected_keys,
     mapping,
+    na_cells,
     results,
     rows,
     sqlite_path,
@@ -539,13 +556,15 @@ def overview_meta(
         to render its HTML and for the selector to build its options.
 
     Shape per entry:
-      {"kind": "none" | "count" | "pending",
+      {"kind": "none" | "na" | "count" | "pending",
        "count": int | None,
        "row_label": str,
        "col_label": str,
        "issue_key": str | None}
 
     Cells with no mapped detector have kind == "none" (rendered as a dash).
+    Cells listed in `na_cells` have kind == "na" (rendered as an N/A badge —
+    intentionally not applicable, e.g. datatype-of-a-missing-value cells).
     Interactive cells that resolve to a single detector store its
     issue_key; the N6 duplicate pair collapses into the synthetic
     `N6_MERGED_KEY` sentinel that drill_router already knows how to expand.
@@ -557,6 +576,8 @@ def overview_meta(
     )
 
     def _cell_state(row, col):
+        if (row, col) in na_cells:
+            return ("na", None)
         keys = mapping.get((row, col))
         if keys is None:
             return ("none", None)
@@ -590,9 +611,9 @@ def overview_meta(
         for _c_idx, _col in enumerate(cols_flat):
             _kind, _count = _cell_state(_row, _col)
             _key = f"{_r_idx}:{_c_idx}"
-            if _kind == "none":
+            if _kind in ("none", "na"):
                 overview_cell_meta[_key] = {
-                    "kind": "none",
+                    "kind": _kind,
                     "count": None,
                     "row_label": _row,
                     "col_label": _col,
@@ -1059,7 +1080,37 @@ def drill_llm_sweep(
                     on_progress=lambda i, t, r, v: _on_progress(i, t, r, v, _bar),
                 )
             for _row, _verdict in verdicts:
-                if _verdict.flagged:
+                if not _verdict.flagged:
+                    continue
+                # Fan-out for schema-suggestion detectors: one LLM call
+                # per type returns a *list* of suggested attributes, but
+                # the drill-in UX expects one Confirm/Dismiss card per
+                # atomic suggestion. Split the list into N proposals here
+                # so downstream cells (buttons / render / confirm-observer /
+                # dismiss-observer / flag_key) each see one attribute at
+                # a time. Non-list suggested_value is unchanged — the
+                # existing single-proposal detectors go through the fall-
+                # through branch untouched.
+                if (
+                    _issue_key in ("missing_object_attribute", "missing_event_attribute")
+                    and isinstance(_verdict.suggested_value, list)
+                ):
+                    from src.llm.tasks._base import DetectionResult
+                    for _item in _verdict.suggested_value:
+                        if not isinstance(_item, dict):
+                            continue
+                        _name = str(_item.get("name") or "").strip()
+                        if not _name:
+                            continue
+                        _fan_row = {**dict(_row), "attribute": _name}
+                        _fan_verdict = DetectionResult(
+                            flagged=True,
+                            rationale=str(_item.get("rationale") or _verdict.rationale or ""),
+                            confidence=float(_item.get("confidence") or _verdict.confidence or 0.0),
+                            suggested_value=_item,
+                        )
+                        _proposals.append({"row": _fan_row, "verdict": _fan_verdict})
+                else:
                     _proposals.append({"row": dict(_row), "verdict": _verdict})
             _verdict_count = len(verdicts)
             _summary_text = (
@@ -1196,9 +1247,19 @@ def drill_llm_confirm_render(
             on what's being replaced. ``context_prefix`` is a short badge
             (empty for object type; ``attr=X`` for attribute values) so a
             page of cards for different attributes stays readable.
+
+            For the schema-suggestion detectors
+            (``missing_object_attribute`` / ``missing_event_attribute``)
+            the "current" side is empty — the attribute doesn't exist yet —
+            and the context prefix names the type the schema addition
+            would land on.
             """
             if _issue_key in ("incorrect_attribute_value", "incorrect_event_attribute_value"):
                 return row.get("actual_value"), f"<b>Attribute:</b> <code>{row.get('attribute')}</code>"
+            if _issue_key in ("missing_object_attribute", "missing_event_attribute"):
+                _t = row.get("ocel_type") or row.get("object_type") or row.get("event_type") or ""
+                _kind_label = "Event type" if _issue_key == "missing_event_attribute" else "Object type"
+                return "—", f"<b>{_kind_label}:</b> <code>{_t}</code>"
             return row.get("ocel_type"), ""
 
         # Group proposals by ocel_type so each type's cards render under
@@ -1218,7 +1279,15 @@ def drill_llm_confirm_render(
             for _i, _prop in _by_type.get(_t, []):
                 _row = _prop["row"]
                 _v = _prop["verdict"]
-                _ocel_id = _row["ocel_id"]
+                # ocel_id is empty for schema-suggestion detectors — their
+                # candidate rows describe a TYPE, not an instance. Use the
+                # suggested attribute name as the card identifier instead.
+                if _issue_key in ("missing_object_attribute", "missing_event_attribute"):
+                    _ocel_id = _row.get("attribute") or "?"
+                    _id_label = "Suggested column"
+                else:
+                    _ocel_id = _row.get("ocel_id", "")
+                    _id_label = "ocel_id"
                 _flag_key = flag_key(sqlite_path, _issue_key, _row)
                 if _flag_key in current_flags:
                     continue   # confirmed → removed entirely
@@ -1227,20 +1296,33 @@ def drill_llm_confirm_render(
                     continue   # dismissed → hidden
                 _bar_pct = int(round(_v.confidence * 100))
                 _current, _context_prefix = _current_and_context(_row)
+                # The two schema-suggestion detectors' verdict.suggested_value
+                # is a dict {name, rationale, confidence, affinity} — render
+                # just the name (+ affinity as a hint) on the card.
+                _suggested_display = _v.suggested_value
+                if (
+                    _issue_key in ("missing_object_attribute", "missing_event_attribute")
+                    and isinstance(_suggested_display, dict)
+                ):
+                    _aff = _suggested_display.get("affinity") or "TEXT"
+                    _suggested_display = (
+                        f"{_suggested_display.get('name','')} "
+                        f"<span style='opacity:0.7;font-size:11px;'>({_aff})</span>"
+                    )
                 _context_line = (
                     f"<div style='margin-bottom:4px'>{_context_prefix}</div>"
                     if _context_prefix else ""
                 )
                 _header = mo.Html(
                     "<div style='font-family:system-ui; padding:6px 0;'>"
-                    f"<div><b>ocel_id:</b> <code>{_ocel_id}</code></div>"
+                    f"<div><b>{_id_label}:</b> <code>{_ocel_id}</code></div>"
                     f"{_context_line}"
                     f"<div style='margin:4px 0'>"
                     f"<b>Current:</b> <span style='background:#fde2e2; color:#b00020; "
                     f"padding:1px 6px; border-radius:3px;'>{_current}</span>"
                     f" &nbsp;→&nbsp; "
                     f"<b>Suggested:</b> <span style='background:#e6ffec; color:#1a7f37; "
-                    f"padding:1px 6px; border-radius:3px;'>{_v.suggested_value}</span>"
+                    f"padding:1px 6px; border-radius:3px;'>{_suggested_display}</span>"
                     f"</div>"
                     f"<div><b>Rationale:</b> {_v.rationale}</div>"
                     f"<div style='margin-top:4px'><b>Confidence:</b> {_v.confidence:.2f}"

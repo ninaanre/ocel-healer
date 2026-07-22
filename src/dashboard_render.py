@@ -37,23 +37,18 @@ SUMMARY_TH_STYLE = (
     "white-space:nowrap;"
 )
 # Vertical variant used for the 13 dimension-column headers in the overview
-# grid: the label is wrapped in an inline-block <span> that gets rotated
-# -90° so it reads bottom-to-top. Rotating a span rather than the <th>
-# itself avoids browsers that drop `transform` on table cells. The <th>
-# stays a normal table cell; only its inner span is rotated. Height is
-# fixed so the rotated text has room; the column pinches down to
-# roughly the header-font-height + a little padding.
+# grid: labels are rotated 180° with `writing-mode:vertical-rl` so they read
+# bottom-up, which lets the column pinch down to header-font-height + a
+# little padding instead of the ~90px each horizontal label needed. Keeps
+# the paper Table 3 orientation intact without overflowing typical laptop
+# widths.
 SUMMARY_TH_VERTICAL_STYLE = (
     "background:#f6f8fa; border-right:1px solid #d0d7de; "
-    "border-bottom:1px solid #d0d7de; padding:6px 4px; "
-    "font-weight:600; vertical-align:bottom; text-align:center; "
-    "white-space:nowrap; height:120px;"
-)
-# Inner span carrying the rotation. `display:inline-block` is required for
-# `transform` to apply; `rotate(-90deg)` reads bottom-to-top.
-SUMMARY_TH_VERTICAL_SPAN_STYLE = (
-    "display:inline-block; transform:rotate(-90deg); "
-    "transform-origin:center center; white-space:nowrap; line-height:1.2;"
+    "border-bottom:1px solid #d0d7de; padding:10px 6px; "
+    "font-weight:600; vertical-align:middle; text-align:center; "
+    "white-space:nowrap; "
+    "writing-mode:vertical-rl; transform:rotate(180deg); "
+    "line-height:1.2;"
 )
 SUMMARY_CORNER_STYLE = (
     "background:#f6f8fa; border-right:1px solid #d0d7de; "
@@ -182,9 +177,8 @@ def render_overview_table_html(
     Layout follows paper Table 3 (Basmer et al.): a corner cell, a
     group-header row spanning Events / Objects / Relations, a column-label
     row, and one body row per entry in `rows`. The 13 dimension column
-    labels are rendered bottom-to-top via a `-90°`-rotated inner `<span>`
-    (see `SUMMARY_TH_VERTICAL_STYLE` / `SUMMARY_TH_VERTICAL_SPAN_STYLE`)
-    so the table fits typical laptop widths
+    labels are rendered rotated 180° via `writing-mode:vertical-rl` (see
+    `SUMMARY_TH_VERTICAL_STYLE`) so the table fits typical laptop widths
     without overflowing horizontally; the group headers stay horizontal
     because their `colspan` gives them room. `cell_meta` is keyed
     "r_idx:c_idx" and carries `{kind, count, row_label, col_label, issue_key}`
@@ -216,18 +210,12 @@ def render_overview_table_html(
         )
     _group_row = "<tr>" + "".join(_group_cells) + "</tr>"
 
-    # Column-label row: one <th> per data column, each holding an inline
-    # span that carries the -90° rotation (rotating the span rather than
-    # the cell keeps browsers happy). The group row's rowspan=2 corner
-    # cell already covers the row-label column's slot in this row, so no
-    # leading corner cell here.
+    # Column-label row: one vertically-rotated <th> per data column. The
+    # group row's rowspan=2 corner cell already covers the row-label
+    # column's slot in this row, so no leading corner cell here.
     _col_cells = []
     for _c in cols_flat:
-        _col_cells.append(
-            f'<th style="{SUMMARY_TH_VERTICAL_STYLE}">'
-            f'<span style="{SUMMARY_TH_VERTICAL_SPAN_STYLE}">{_c}</span>'
-            f'</th>'
-        )
+        _col_cells.append(f'<th style="{SUMMARY_TH_VERTICAL_STYLE}">{_c}</th>')
     _col_row = "<tr>" + "".join(_col_cells) + "</tr>"
 
     # Body rows.
@@ -305,6 +293,11 @@ IS_BAD_FOR_ISSUE: dict[str, Callable[[dict, str], bool]] = {
     "missing_object":                    bad_col("ocel_object_id"),
     "missing_object_type":               bad_col("ocel_type"),
     "missing_attribute_value":           bad_col("actual_value"),
+    # Schema-suggestion detectors: the "missing thing" IS the attribute
+    # name — highlight the column that carries it in the fanned-out
+    # proposal rows.
+    "missing_object_attribute":          bad_col("attribute"),
+    "missing_event_attribute":           bad_col("attribute"),
     "dangling_o2o_relationship":         bad_o2o,
     "dangling_e2o_relationship":         bad_e2o,
     "duplicate_objects_on_ids":          bad_dup_id,
@@ -521,6 +514,20 @@ def render_action(mo, action: dict):
             f"<div><b>Rationale:</b> {action['rationale']}</div>"
             f"{confidence_bar}</div>"
         )
+    if action["kind"] == "alter_add_column":
+        # Schema addition: no `old_value` to show, and `new_value` carries
+        # the SQLite affinity token rather than a row value.
+        return mo.Html(
+            f"<div style='font-family:system-ui'>"
+            f"<div><b>Kind:</b> alter_add_column &nbsp; "
+            f"<b>Table:</b> {action['target_table']} &nbsp; "
+            f"<b>Column:</b> {action['column'] or '—'} &nbsp; "
+            f"<b>Affinity:</b> {action['new_value'] or 'TEXT'}</div>"
+            f"<div style='margin:6px 0'>Existing rows keep NULL for the new column; "
+            f"the value-level missing-attribute detector will pick them up on the next sweep.</div>"
+            f"<div><b>Rationale:</b> {action['rationale']}</div>"
+            f"{confidence_bar}</div>"
+        )
     return mo.Html(
         f"<div style='font-family:system-ui'>"
         f"<div><b>Kind:</b> {action['kind']} &nbsp; <b>Table:</b> {action['target_table']} "
@@ -535,6 +542,12 @@ def render_action(mo, action: dict):
 def is_routable(action: dict) -> bool:
     if action.get("kind") == "insert":
         return bool(action.get("inserts"))
+    if action.get("kind") == "alter_add_column":
+        # Schema addition: no target_pk (there is no row to route to), but
+        # a table + column name is sufficient for apply_repair to run the
+        # ALTER TABLE. new_value carries the affinity token (defaulted to
+        # TEXT downstream) so its absence is not disqualifying.
+        return bool(action.get("target_table") and action.get("column"))
     return (
         action.get("target_table")
         and action.get("column")
