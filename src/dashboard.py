@@ -569,11 +569,15 @@ def overview_meta(
     issue_key; the N6 duplicate pair collapses into the synthetic
     `N6_MERGED_KEY` sentinel that drill_router already knows how to expand.
     """
-    _llm_confirmed = sum(1 for k in get_flags() if k[0] == sqlite_path)
+    # Bucket confirmed-flag counts by issue key so each LLM cell reads only
+    # its own count. Flags are keyed (sqlite_path, issue_key, ocel_id, extra);
+    # collapsing across issue_key here previously made every LLM cell mirror
+    # the same total once any single sweep was confirmed.
+    _llm_confirmed_by_key: dict[str, int] = {}
+    for k in get_flags():
+        if k[0] == sqlite_path:
+            _llm_confirmed_by_key[k[1]] = _llm_confirmed_by_key.get(k[1], 0) + 1
     _sweep_ran = get_sweep_ran()
-    _llm_ever_run = any(
-        (sqlite_path, key) in _sweep_ran for key in llm_detected_keys
-    )
 
     def _cell_state(row, col):
         if (row, col) in na_cells:
@@ -582,16 +586,19 @@ def overview_meta(
         if keys is None:
             return ("none", None)
         # A cell is "pending" only if every one of its underlying detectors
-        # is LLM-based AND the sweep has not run for any of them.
+        # is LLM-based AND the sweep has not run for THAT key yet. Using a
+        # global "any sweep ran" flag would flip every LLM cell out of
+        # pending as soon as one unrelated sweep completed.
         all_llm_pending = all(
-            key in llm_detected_keys and not _llm_ever_run for key in keys
+            key in llm_detected_keys and (sqlite_path, key) not in _sweep_ran
+            for key in keys
         )
         if all_llm_pending:
             return ("pending", None)
         total = 0
         for key in keys:
             if key in llm_detected_keys:
-                total += _llm_confirmed
+                total += _llm_confirmed_by_key.get(key, 0)
             else:
                 total += results[key].height
         return ("count", total)
