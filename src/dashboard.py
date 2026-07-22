@@ -633,14 +633,14 @@ def overview_selector(
     _persisted_row = get_overview_row()
     _initial_row = _persisted_row if _persisted_row in _row_options else None
     # Guard against empty options — if no rows are eligible (e.g. mid-rebuild
-    # after a sweep), render a disabled sentinel rather than passing an
-    # empty list into mo.ui.dropdown.
+    # after a sweep), render a sentinel placeholder rather than passing an
+    # empty list into mo.ui.dropdown. (We don't pass `disabled=` because
+    # older marimo versions don't accept it as a kwarg.)
     row_picker_widget = mo.ui.dropdown(
         options=_row_options or ["— no categories —"],
         label="Category:",
         value=_initial_row,
         on_change=set_overview_row,
-        disabled=not _row_options,
     )
     return (row_picker_widget,)
 
@@ -687,14 +687,15 @@ def overview_column_selector(
     _persisted_col = get_overview_col()
     _initial_col = _persisted_col if _persisted_col in _col_options.values() else None
     # Guard against empty options — if the picked row has no eligible
-    # columns (or no row is picked yet), render a disabled sentinel
-    # rather than passing an empty dict into mo.ui.dropdown.
+    # columns (or no row is picked yet), render a sentinel placeholder
+    # rather than passing an empty dict into mo.ui.dropdown. (We don't
+    # pass `disabled=` because older marimo versions don't accept it as
+    # a kwarg.)
     col_picker_widget = mo.ui.dropdown(
         options=_col_options or {"— no dimensions —": None},
         label="Dimension:",
         value=_initial_col,
         on_change=set_overview_col,
-        disabled=not _col_options,
     )
     # Bind the hstack to a local so it's unambiguously the cell's output —
     # a bare expression immediately followed by ``return`` can be fragile
