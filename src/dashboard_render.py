@@ -283,6 +283,12 @@ def bad_dup_attrs(_row: dict, c: str) -> bool:
     return c == "attribute_values"
 
 
+def bad_self_loop(_row: dict, c: str) -> bool:
+    # Highlight both endpoint columns — they're equal on a self-loop, and
+    # that's the whole reason the row is flagged.
+    return c in ("ocel_source_id", "ocel_target_id")
+
+
 # Mapping of issue_key -> is_bad predicate. Central place so the drill-in
 # renderer can pick the right highlighter from the issue_key alone.
 IS_BAD_FOR_ISSUE: dict[str, Callable[[dict, str], bool]] = {
@@ -311,6 +317,10 @@ IS_BAD_FOR_ISSUE: dict[str, Callable[[dict, str], bool]] = {
     "incorrect_attribute_value":         bad_col("actual_value"),
     "incorrect_event_attribute_datatype": bad_col("actual_value"),
     "incorrect_event_attribute_value":    bad_col("actual_value"),
+    # Rule-only relation-side "Incorrect Data" detectors.
+    "duplicate_o2o_relations":            bad_col("count"),
+    "o2o_self_loop":                      bad_self_loop,
+    "duplicate_e2o_relations":            bad_col("count"),
 }
 
 

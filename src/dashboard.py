@@ -89,11 +89,16 @@ def issue_labels():
         "incorrect_attribute_value":         "Incorrect Object Attribute Value",
         "incorrect_event_attribute_datatype": "Incorrect Event Attribute Type",
         "incorrect_event_attribute_value":    "Incorrect Event Attribute Value",
+        "duplicate_o2o_relations":            "Duplicate Object-to-Object Relations",
+        "o2o_self_loop":                      "Object-to-Object Self-Loop",
+        "duplicate_e2o_relations":            "Duplicate Event-to-Object Relations",
     }
     # Synthetic sentinels for merged cells (paper §4.2). Each sentinel spans
     # two detectors under a single "Incorrect …" heading:
     #   N6_MERGED_KEY  — objects: id-duplicates + attribute-duplicates.
     #   DUP_EVENTS_MERGED_KEY — events: same pair, event-side (paper I6 mirror).
+    #   O2O_INCORRECT_MERGED_KEY — object-object relations: duplicate triples
+    #                              + self-loops (structural illegal shape).
     # DRILL_LABELS extends ISSUE_LABELS with the sentinels so the drill-in
     # section header renders the paper label rather than the raw key.
     # MERGED_KEYS is the (sentinel, sub_keys) table consumed by
@@ -103,14 +108,18 @@ def issue_labels():
     N6_SUB_KEYS = ["duplicate_objects_on_ids", "duplicate_objects_on_attributes"]
     DUP_EVENTS_MERGED_KEY = "__i6_incorrect_event"
     DUP_EVENTS_SUB_KEYS = ["duplicate_events_on_ids", "duplicate_events_on_attributes"]
+    O2O_INCORRECT_MERGED_KEY = "__i_incorrect_o2o"
+    O2O_INCORRECT_SUB_KEYS = ["duplicate_o2o_relations", "o2o_self_loop"]
     MERGED_KEYS: list[tuple[str, list[str]]] = [
         (N6_MERGED_KEY, N6_SUB_KEYS),
         (DUP_EVENTS_MERGED_KEY, DUP_EVENTS_SUB_KEYS),
+        (O2O_INCORRECT_MERGED_KEY, O2O_INCORRECT_SUB_KEYS),
     ]
     DRILL_LABELS = {
         **ISSUE_LABELS,
         N6_MERGED_KEY: "Incorrect Object",
         DUP_EVENTS_MERGED_KEY: "Incorrect Event",
+        O2O_INCORRECT_MERGED_KEY: "Incorrect Object-to-Object",
     }
     return (
         DRILL_LABELS,
@@ -120,6 +129,8 @@ def issue_labels():
         MERGED_KEYS,
         N6_MERGED_KEY,
         N6_SUB_KEYS,
+        O2O_INCORRECT_MERGED_KEY,
+        O2O_INCORRECT_SUB_KEYS,
     )
 
 
@@ -549,6 +560,17 @@ def overview_config():
         ("Incorrect Data", "Object Attribute Value"):    ["incorrect_attribute_value"],   # N8b (LLM)
         ("Incorrect Data", "Event Attribute Type"):      ["incorrect_event_attribute_datatype"], # I8a (rule)
         ("Incorrect Data", "Event Attribute Value"):     ["incorrect_event_attribute_value"],    # I8b (LLM)
+
+        # Incorrect Data / Relations — rule-only.
+        # O2O collapses duplicate-triple detection and self-loop detection
+        # into a single cell (same pattern as N6 / DUP_EVENTS). E2O has
+        # only the duplicate detector (self-loops don't apply — event
+        # and object ids live in disjoint namespaces), so it's a plain
+        # single-key cell without a merged sentinel.
+        ("Incorrect Data", "Object-to-Object"):          [
+            "duplicate_o2o_relations", "o2o_self_loop",
+        ],
+        ("Incorrect Data", "Event-to-Object"):           ["duplicate_e2o_relations"],
     }
     # Cells that are intentionally not applicable rather than merely
     # unmapped — a missing value has no declared datatype, so the
