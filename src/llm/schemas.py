@@ -135,6 +135,34 @@ class InferredObjectOutput(TaskOutput):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+class SuggestedAttribute(BaseModel):
+    """One suggested attribute in a `SuggestedAttributesOutput`."""
+
+    name: str
+    rationale: str = ""
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    # Optional SQLite affinity hint the model may return so the fix path
+    # can pick a column type when ALTERing the sub-table. Free-form to
+    # keep the model prompt small; validated downstream against the four
+    # SQLite storage classes (TEXT/INTEGER/REAL/BLOB) with TEXT as the
+    # fallback.
+    affinity: str | None = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class SuggestedAttributesOutput(TaskOutput):
+    """missing_object_attribute + missing_event_attribute (LLM detection).
+
+    The model receives one type (with its currently-declared attributes
+    and peer-type summaries) and proposes attributes the schema is
+    missing. An empty list means "no suggestions" — the sweep records
+    zero flags for this type.
+    """
+
+    suggested_attributes: list[SuggestedAttribute] = Field(default_factory=list)
+
+
 __all__ = [
     "TaskOutput",
     "InferredTypeOutput",
@@ -146,4 +174,6 @@ __all__ = [
     "DuplicateResolutionOutput",
     "InferredTimestampOutput",
     "InferredObjectOutput",
+    "SuggestedAttribute",
+    "SuggestedAttributesOutput",
 ]

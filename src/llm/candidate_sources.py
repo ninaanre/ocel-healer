@@ -10,6 +10,13 @@ shapes as candidates:
                                          pair for that object type.
 - ``incorrect_event_attribute_value``  → one row per (event, attribute)
                                          pair for a chosen event type.
+- ``missing_object_attribute``         → one row per object TYPE (the
+                                         chosen type). The LLM is called
+                                         once per type; the returned list
+                                         of suggestions is fanned out into
+                                         N proposal cards in the sweep loop.
+- ``missing_event_attribute``          → one row per event TYPE (same
+                                         pattern, event-side).
 
 Rather than smearing that dispatch across the sweep cell, every LLM-detected
 issue registers its own row source here and the sweep just asks
@@ -21,7 +28,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from src.detection.error_detection import (
+    _column_info,
     _connect,
+    _event_type_tables,
+    _object_type_tables,
+    _OCEL_RESERVED,
     iter_type_correct_attr_values,
     iter_type_correct_event_attr_values,
 )
@@ -61,10 +72,65 @@ def _candidates_incorrect_event_attribute_value(sqlite_path: str, chosen_type: s
     return iter_type_correct_event_attr_values(sqlite_path, event_type=chosen_type)
 
 
+def _candidates_missing_object_attribute(sqlite_path: str, chosen_type: str) -> list[dict]:
+    """One row per object type. The row carries the type's declared
+    attributes so the sweep can decorate the parse step and downstream
+    proposals with peer context without re-querying.
+
+    Guards: returns ``[]`` if the chosen type has no per-type sub-table
+    (e.g. the user picked a type that only appears in the top-level
+    `object` table without an `object_map_type` entry). This surfaces as
+    "0 candidates" in the sweep progress bar rather than a crash.
+    """
+    with _connect(sqlite_path) as conn:
+        type_map = dict(_object_type_tables(conn))
+        table = type_map.get(chosen_type)
+        if not table:
+            return []
+        declared = [
+            c for c, _ in _column_info(conn, table) if c not in _OCEL_RESERVED
+        ]
+    return [
+        {
+            "ocel_type": chosen_type,
+            "object_type": chosen_type,
+            "_resolved_target_table": table,
+            # Snapshot the declared columns onto the row for the parse-time
+            # duplicate guard; underscore-prefixed so it doesn't leak into
+            # the prompt renderer's JSON block.
+            "_declared_attributes": declared,
+            "issue": "missing_object_attribute",
+        }
+    ]
+
+
+def _candidates_missing_event_attribute(sqlite_path: str, chosen_type: str) -> list[dict]:
+    """Event-side counterpart. One row per event type."""
+    with _connect(sqlite_path) as conn:
+        type_map = dict(_event_type_tables(conn))
+        table = type_map.get(chosen_type)
+        if not table:
+            return []
+        declared = [
+            c for c, _ in _column_info(conn, table) if c not in _OCEL_RESERVED
+        ]
+    return [
+        {
+            "ocel_type": chosen_type,
+            "event_type": chosen_type,
+            "_resolved_target_table": table,
+            "_declared_attributes": declared,
+            "issue": "missing_event_attribute",
+        }
+    ]
+
+
 _SOURCES: dict[str, RowSource] = {
     "incorrect_object_type":            _candidates_incorrect_object_type,
     "incorrect_attribute_value":        _candidates_incorrect_attribute_value,
     "incorrect_event_attribute_value":  _candidates_incorrect_event_attribute_value,
+    "missing_object_attribute":         _candidates_missing_object_attribute,
+    "missing_event_attribute":          _candidates_missing_event_attribute,
 }
 
 
@@ -85,6 +151,8 @@ def candidate_noun(issue_key: str) -> str:
         "incorrect_object_type":            "object",
         "incorrect_attribute_value":        "attribute value",
         "incorrect_event_attribute_value":  "event attribute value",
+        "missing_object_attribute":         "type schema",
+        "missing_event_attribute":          "event type schema",
     }.get(issue_key, "candidate")
 
 
@@ -95,6 +163,7 @@ def candidate_kind(issue_key: str) -> str:
     picks from event types when drilling into event-attribute issues."""
     return {
         "incorrect_event_attribute_value":  "event",
+        "missing_event_attribute":          "event",
     }.get(issue_key, "object")
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,14 +23,20 @@ class ActionResult:
     """Task-side outcome of parsing the LLM payload.
 
     `kind` is one of:
-      "update"   -- proposed concrete value; all fields populated.
-      "delete"   -- remove duplicate rows keeping MIN(rowid).
-      "insert"   -- create one or more new rows (see `inserts`); used by
-                    tasks like `missing_object` that must add both a row to
-                    `object` and a matching initial-state row to `object_<Type>`.
-      "decline"  -- LLM said null; orchestrator attaches a routable target
-                    (via task.suppressed_target) so override still works.
-      "unrouted" -- no clean override target (e.g. duplicate_objects_on_ids).
+      "update"           -- proposed concrete value; all fields populated.
+      "delete"           -- remove duplicate rows keeping MIN(rowid).
+      "insert"           -- create one or more new rows (see `inserts`); used by
+                            tasks like `missing_object` that must add both a row
+                            to `object` and a matching initial-state row to
+                            `object_<Type>`.
+      "alter_add_column" -- add a NULL column to a per-type sub-table (schema
+                            change). `target_table`, `column` and `new_value`
+                            (holding a SQLite affinity token) are populated;
+                            existing rows keep NULL and are picked up by the
+                            downstream `missing_*_attribute_value` detectors.
+      "decline"          -- LLM said null; orchestrator attaches a routable target
+                            (via task.suppressed_target) so override still works.
+      "unrouted"         -- no clean override target (e.g. duplicate_objects_on_ids).
     """
     kind: str
     target_table: str = ""
@@ -55,6 +62,23 @@ class ActionResult:
     def insert(cls, *, inserts: list[dict], reason: str = "") -> "ActionResult":
         """Insert one or more new rows. All inserts run in a single transaction."""
         return cls(kind="insert", reason=reason, inserts=list(inserts))
+
+    @classmethod
+    def alter_add_column(
+        cls, *, target_table: str, column: str, affinity: str = "TEXT", reason: str = "",
+    ) -> "ActionResult":
+        """Add a NULL column to a per-type sub-table.
+
+        `affinity` is a SQLite storage-class token (`TEXT`, `INTEGER`,
+        `REAL`, `BLOB`) — validated at apply time. `TEXT` is the safe
+        default when the LLM doesn't hint at a specific affinity."""
+        return cls(
+            kind="alter_add_column",
+            target_table=target_table,
+            column=column,
+            new_value=affinity,
+            reason=reason,
+        )
 
     @classmethod
     def decline(cls, reason: str) -> "ActionResult":
@@ -237,6 +261,20 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
         action["inserts"] = result.inserts
         return action
 
+    if result.kind == "alter_add_column":
+        # No target_pk (schema change, not a row update). `column` carries the
+        # new attribute name and `new_value` carries the SQLite affinity token
+        # (TEXT/INTEGER/REAL/BLOB). apply_repair validates both against a
+        # per-type sub-table whitelist.
+        return _action(
+            "alter_add_column",
+            target={"target_table": result.target_table, "target_pk": {},
+                    "column": result.column, "old_value": None},
+            new_value=result.new_value, rationale=result.reason or rationale,
+            confidence=confidence, issue_key=issue_key,
+            proposed_value=result.column,
+        )
+
     if result.kind == "decline":
         return _action(
             "noop", target=task.suppressed_target(row) or _EMPTY_TARGET,
@@ -403,6 +441,56 @@ def _validate_insert(conn: sqlite3.Connection, entry: dict) -> tuple[str, dict[s
     return table, coerced
 
 
+# Column names we're willing to ADD via ALTER TABLE. Deliberately strict:
+# lowercase-friendly, starts with a letter, no reserved OCEL2 prefixes.
+_SAFE_COLUMN_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_RESERVED_COLUMN_PREFIXES = ("ocel_",)
+_ALLOWED_AFFINITIES = {"TEXT", "INTEGER", "REAL", "BLOB"}
+
+
+def _validate_alter_add_column(conn: sqlite3.Connection, action: dict) -> tuple[str, str, str]:
+    """Whitelist an `alter_add_column` action against the live schema.
+
+    Returns (resolved_table, column, affinity). Enforces:
+      - target_table is a per-type sub-table (`object_<Type>` or
+        `event_<Type>`). Top-level `object`, `event`, `event_object`,
+        `object_object` are rejected to keep the OCEL2 spine intact.
+      - column is a safe SQLite identifier and does not already exist on
+        the table (idempotency guard).
+      - column does not shadow a reserved `ocel_*` name.
+      - affinity is one of the four SQLite storage classes.
+    """
+    table = _resolve_table(conn, action["target_table"])
+    per_type = (
+        {t for _, t in _object_type_tables(conn)}
+        | {t for _, t in _event_type_tables(conn)}
+    )
+    if table not in per_type:
+        raise ValueError(
+            f"Refusing to alter: {table!r} is not a per-type sub-table."
+        )
+    column = action.get("column") or ""
+    if not _SAFE_COLUMN_NAME.match(column):
+        raise ValueError(f"Refusing to alter: unsafe column name {column!r}.")
+    if column.lower().startswith(_RESERVED_COLUMN_PREFIXES):
+        raise ValueError(
+            f"Refusing to alter: column name {column!r} shadows a reserved "
+            f"OCEL2 prefix."
+        )
+    existing = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    if column in existing:
+        raise ValueError(
+            f"Refusing to alter: column {column!r} already exists on {table!r}."
+        )
+    affinity = str(action.get("new_value") or "TEXT").upper()
+    if affinity not in _ALLOWED_AFFINITIES:
+        raise ValueError(
+            f"Refusing to alter: affinity {affinity!r} is not one of "
+            f"{sorted(_ALLOWED_AFFINITIES)}."
+        )
+    return table, column, affinity
+
+
 def apply_repair(
     sqlite_path: str,
     action: dict,
@@ -430,10 +518,26 @@ def apply_repair(
     elif action["kind"] == "insert":
         if has_override:
             raise ValueError("override not supported for insert actions")
+    elif action["kind"] == "alter_add_column":
+        if has_override:
+            raise ValueError("override not supported for alter_add_column actions")
     elif action["kind"] not in ("update", "delete"):
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
     with _connect(sqlite_path) as conn:
+        if action["kind"] == "alter_add_column":
+            table, column, affinity = _validate_alter_add_column(conn, action)
+            sql = f'ALTER TABLE {quote(table)} ADD COLUMN {quote(column)} {affinity}'
+            rendered = sql
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            with conn:
+                conn.execute(sql)
+            return (
+                f"Committed: added column {column!r} ({affinity}) to {table!r}.\n"
+                f"{rendered}"
+            )
+
         if action["kind"] == "insert":
             entries = action.get("inserts") or []
             if not entries:
