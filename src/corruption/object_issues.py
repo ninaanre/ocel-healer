@@ -97,7 +97,7 @@ def inject_missing_attribute_value_empty_string_role(conn: sqlite3.Connection) -
     `Christine von Dobbert`."""
     n = conn.execute(
         'UPDATE object_Employees SET role = \'\' WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL AND role IS NOT NULL',
+        'AND role IS NOT NULL',
         ("Christine von Dobbert",),
     ).rowcount
     return ["Christine von Dobbert"] if n > 0 else []
@@ -148,8 +148,7 @@ def inject_incorrect_attribute_datatype_string_in_weight(conn: sqlite3.Connectio
     """incorrect_attribute_datatype Easy: Put `'unknown'` into
     `object_Products.weight` (REAL)."""
     n = conn.execute(
-        'UPDATE object_Products SET weight = ? WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL',
+        'UPDATE object_Products SET weight = ? WHERE ocel_id = ?',
         ("unknown", "iPad Air"),
     ).rowcount
     return "iPad Air" if n > 0 else None
@@ -159,8 +158,7 @@ def inject_incorrect_attribute_datatype_string_in_order_price(conn: sqlite3.Conn
     """incorrect_attribute_datatype Medium: Put `'TBD'` into
     `object_Orders.price` (REAL)."""
     n = conn.execute(
-        'UPDATE object_Orders SET price = ? WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL',
+        'UPDATE object_Orders SET price = ? WHERE ocel_id = ?',
         ("TBD", "o-990200"),
     ).rowcount
     return "o-990200" if n > 0 else None
@@ -171,8 +169,7 @@ def inject_incorrect_attribute_datatype_blob_in_role(conn: sqlite3.Connection) -
     `object_Employees.role` (TEXT) — the shape you'd see if a legacy
     system exported the role column without decoding it first."""
     n = conn.execute(
-        'UPDATE object_Employees SET role = ? WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL',
+        'UPDATE object_Employees SET role = ? WHERE ocel_id = ?',
         ("Sales".encode("utf-16-le"), "Jan Niklas Adams"),
     ).rowcount
     return "Jan Niklas Adams" if n > 0 else None
@@ -276,8 +273,7 @@ def inject_duplicate_objects_on_attributes_clone_order_and_referenced(conn: sqli
 def inject_incorrect_object_attribute_value_negative_weight_easy(conn: sqlite3.Connection) -> str | None:
     """incorrect_object_attribute_value Easy: Set product weight to -999 (obviously wrong)."""
     n = conn.execute(
-        'UPDATE object_Products SET weight = -999 WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL',
+        'UPDATE object_Products SET weight = -999 WHERE ocel_id = ?',
         ("iPad Pro",),
     ).rowcount
     return "iPad Pro" if n > 0 else None
@@ -286,8 +282,7 @@ def inject_incorrect_object_attribute_value_negative_weight_easy(conn: sqlite3.C
 def inject_incorrect_object_attribute_value_implausible_weight_hard(conn: sqlite3.Connection) -> str | None:
     """incorrect_object_attribute_value Hard: Set iPhone weight to 50000g (plausible format but wrong)."""
     n = conn.execute(
-        'UPDATE object_Products SET weight = 50000 WHERE ocel_id = ? '
-        'AND ocel_changed_field IS NULL',
+        'UPDATE object_Products SET weight = 50000 WHERE ocel_id = ?',
         ("iPhone 13",),
     ).rowcount
     return "iPhone 13" if n > 0 else None
