@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import sqlite3
 
+from .p2p_mappings import (
+    get_p2p_object_type,
+    get_p2p_e2o_qualifier,
+    get_p2p_o2o_qualifier,
+)
+
 
 # ---------------------------------------------------------------------------
 # Base dangling_e2o_relationship helpers — building blocks reused by the
@@ -80,39 +86,74 @@ def inject_dangling_e2o_relationship_missing_both(conn: sqlite3.Connection) -> t
 
 
 def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) -> tuple[str, str]:
-    """dangling_o2o_relationship Easy: Source id is a typo near-miss of a
-    real employee, target is a real employee."""
-    src = "Wil van der Aalts"      # real id: 'Wil van der Aalst'
-    dst = "Wil van der Aalst"
+    """dangling_o2o_relationship Easy: Source id is a typo near-miss,
+    target is a real object."""
+    obj_type = get_p2p_object_type("employees")
+    qualifier = get_p2p_o2o_qualifier("processed_by")
+
+    dst = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    ).fetchone()
+    if dst is None:
+        return ("fake-src", "fake-dst")
+
+    src = f"{dst[0]}-TYPO"  # Create typo variant
     conn.execute(
         "INSERT INTO object_object VALUES (?, ?, ?)",
-        (src, dst, "primarySalesRep"),
+        (src, dst[0], qualifier),
     )
-    return src, dst
+    return src, dst[0]
 
 
 def inject_dangling_o2o_relationship_missing_target(conn: sqlite3.Connection) -> tuple[str, str]:
-    """dangling_o2o_relationship Medium: Real customer references a
-    typo near-miss of a real employee id (distinct typo from the hard tier)."""
-    src = "Balkan Minerals d.o.o."
-    dst = "Wil van der Aslst"      # real id: 'Wil van der Aalst' (l/s transposed)
+    """dangling_o2o_relationship Medium: Real source references a
+    typo near-miss target."""
+    customers_type = get_p2p_object_type("customers")
+    employee_type = get_p2p_object_type("employees")
+    qualifier = get_p2p_o2o_qualifier("processed_by")
+
+    src = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (employee_type,)
+    ).fetchone()
+
+    if src is None or dst is None:
+        return ("fake-src", "fake-dst")
+
+    dst_typo = f"{dst[0]}-TYPO"
     conn.execute(
         "INSERT INTO object_object VALUES (?, ?, ?)",
-        (src, dst, "primarySalesRep"),
+        (src[0], dst_typo, qualifier),
     )
-    return src, dst
+    return src[0], dst_typo
 
 
 def inject_dangling_o2o_relationship_missing_both_typo(conn: sqlite3.Connection) -> tuple[str, str]:
     """dangling_o2o_relationship Hard: Both endpoints are typo near-misses
     of real ids."""
-    src = "AlpenTech Innovation AG"      # real id: 'AlpenTech Innovations AG'
-    dst = "Wil van der Aallst"           # real id: 'Wil van der Aalst'
+    customers_type = get_p2p_object_type("customers")
+    employee_type = get_p2p_object_type("employees")
+    qualifier = get_p2p_o2o_qualifier("processed_by")
+
+    src = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
+    ).fetchone()
+    dst = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (employee_type,)
+    ).fetchone()
+
+    if src is None or dst is None:
+        return ("fake-src", "fake-dst")
+
+    src_typo = f"{src[0]}-TYPO1"
+    dst_typo = f"{dst[0]}-TYPO2"
     conn.execute(
         "INSERT INTO object_object VALUES (?, ?, ?)",
-        (src, dst, "primarySalesRep"),
+        (src_typo, dst_typo, qualifier),
     )
-    return src, dst
+    return src_typo, dst_typo
 
 
 # ---------------------------------------------------------------------------
@@ -126,60 +167,59 @@ def inject_dangling_o2o_relationship_missing_both_typo(conn: sqlite3.Connection)
 
 
 def inject_missing_object_order_easy(conn: sqlite3.Connection) -> str | None:
-    """missing_object Easy: E2O row references orders:o-991000
+    """missing_object Easy: E2O row references purchase_order:po-991000
     (id doesn't exist).
 
-    Easy because the `orders:` prefix immediately pins the type and the
-    peer set for the LLM to imitate is large (~2k orders).
+    Easy because the type prefix immediately pins the type and the
+    peer set for the LLM to imitate is large.
     """
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type='place order' LIMIT 1").fetchone()
+    place_type = get_p2p_event_type("place order")
+    order_qual = get_p2p_e2o_qualifier("order")
+    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (place_type,)).fetchone()
     if ev is None:
         return None
-    missing_id = "orders:o-991000"
+    missing_id = "purchase_order:po-991000"
     conn.execute(
         "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, "order"),
+        (ev[0], missing_id, order_qual),
     )
     return missing_id
 
 
 def inject_missing_object_item_medium(conn: sqlite3.Connection) -> str | None:
-    """missing_object Medium: E2O row references items:i-881000
+    """missing_object Medium: E2O row references material:mat-881000
     (id doesn't exist).
 
-    Medium because items share the schema of products (`weight`, `price`),
-    so the LLM must respect the `items:` prefix rather than sliding the
-    inferred type to products.
+    Medium because materials are used in multiple contexts.
     """
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type='pick item' LIMIT 1").fetchone()
+    pick_type = get_p2p_event_type("pick item")
+    item_qual = get_p2p_e2o_qualifier("item")
+    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (pick_type,)).fetchone()
     if ev is None:
         return None
-    missing_id = "items:i-881000"
+    missing_id = "material:mat-881000"
     conn.execute(
         "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, "item"),
+        (ev[0], missing_id, item_qual),
     )
     return missing_id
 
 
 def inject_missing_object_product_hard(conn: sqlite3.Connection) -> str | None:
-    """missing_object Hard: E2O row references products:Echo Show 10
-    (a plausible-sounding product in an existing family — real ids include
-    `Echo Show 5` and `Echo Show 8` — but this id doesn't exist).
+    """missing_object Hard: E2O row references material with plausible name
+    but doesn't exist.
 
-    Hard because product ids don't use the `<type>:<id>` prefix in the
-    clean dataset (product `ocel_id` is a bare product name like
-    `Echo Dot`). We deliberately introduce a `products:` prefix here to
-    exercise the prefix-based detector path and force the LLM to fabricate
-    all initial attributes (weight, price) from the peer distribution.
+    Hard because material ids may not use type prefix consistently.
     """
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type='place order' LIMIT 1").fetchone()
+    place_type = get_p2p_event_type("place order")
+    product_qual = get_p2p_e2o_qualifier("product")
+    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (place_type,)).fetchone()
     if ev is None:
         return None
-    missing_id = "products:Echo Show 10"
+    missing_id = "material:MISSING_PRODUCT_XYZ"
     conn.execute(
         "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, "product"),
+        (ev[0], missing_id, product_qual),
     )
     return missing_id
 
@@ -208,11 +248,19 @@ def _insert_o2o_copies(
 def inject_duplicate_o2o_relations_comprises_easy(
     conn: sqlite3.Connection,
 ) -> tuple[str, str, str]:
-    """duplicate_o2o_relations Easy: an order↔item `comprises` triple gets
-    two extra copies (3 rows total). High-frequency qualifier — the
-    duplicate stands out clearly against the surrounding 7.6k comprises
-    rows only because it repeats id-for-id."""
-    return _insert_o2o_copies(conn, "o-990001", "i-880001", "comprises", extras=2)
+    """duplicate_o2o_relations Easy: insert duplicate o2o triple."""
+    qual = get_p2p_o2o_qualifier("comprises")
+    row = conn.execute(
+        "SELECT ocel_source_id, ocel_target_id FROM object_object WHERE ocel_qualifier = ? LIMIT 1", (qual,)
+    ).fetchone()
+    if row is None:
+        # Fallback: create relationship between any two materials
+        src = conn.execute("SELECT ocel_id FROM object LIMIT 1").fetchone()
+        tgt = conn.execute("SELECT ocel_id FROM object LIMIT 1 OFFSET 1").fetchone()
+        if src and tgt:
+            return _insert_o2o_copies(conn, src[0], tgt[0], qual, extras=2)
+        return ("fake", "fake", qual)
+    return _insert_o2o_copies(conn, row[0], row[1], qual, extras=2)
 
 
 def inject_duplicate_o2o_relations_places_medium(
