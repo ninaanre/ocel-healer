@@ -56,9 +56,17 @@ def _clone_object_row(
     ocel_type: str,
     table: str,
 ) -> str | None:
+    # Check if ocel_changed_field column exists
+    has_changed_field = conn.execute(
+        f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'ocel_changed_field'",
+    ).fetchone()[0]
+    where_clause = (
+        "WHERE ocel_id = ? AND ocel_changed_field IS NULL"
+        if has_changed_field
+        else "WHERE ocel_id = ?"
+    )
     row = conn.execute(
-        f'SELECT * FROM "{table}" WHERE ocel_id = ? AND ocel_changed_field IS NULL '
-        "LIMIT 1",
+        f'SELECT * FROM "{table}" {where_clause} LIMIT 1',
         (source_id,),
     ).fetchone()
     if row is None:

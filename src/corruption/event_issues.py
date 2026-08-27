@@ -204,13 +204,17 @@ def inject_missing_event_attribute_value_null_order_id_easy(conn: sqlite3.Connec
     """missing_event_attribute_value Easy: NULL an order_id in event_PlaceOrder.
 
     Easy because PlaceOrder is common and order_id is obviously required."""
+    # Check if order_id column exists first
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PlaceOrder)").fetchall()]
+    if "order_id" not in cols:
+        return None
     row = conn.execute(
-        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+        "SELECT ocel_id FROM event_PlaceOrder  LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     conn.execute(
-        "UPDATE event_PlaceOrder SET order_id = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_PlaceOrder SET order_id = NULL WHERE ocel_id = ?",
         row,
     )
     return row[0]
@@ -221,21 +225,16 @@ def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connecti
 
     Hard because ItemOutOfStock is rare and reason is a less obvious required field."""
     row = conn.execute(
-        "SELECT ocel_id FROM event_ItemOutOfStock WHERE ocel_changed_field IS NULL LIMIT 1"
+        "SELECT ocel_id FROM event_ItemOutOfStock  LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     # Check if reason column exists first
     cols = [c[1] for c in conn.execute("PRAGMA table_info(event_ItemOutOfStock)").fetchall()]
-    if "reason" in cols:
-        conn.execute(
-            "UPDATE event_ItemOutOfStock SET reason = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
-            row,
-        )
-        return row[0]
-    # Fallback: null item_id instead
+    if "reason" not in cols:
+        return None
     conn.execute(
-        "UPDATE event_ItemOutOfStock SET item_id = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_ItemOutOfStock SET reason = NULL WHERE ocel_id = ?",
         row,
     )
     return row[0]
@@ -250,30 +249,34 @@ def inject_incorrect_event_attribute_datatype_string_in_quantity_easy(conn: sqli
     """incorrect_event_attribute_datatype Easy: Put 'unknown' in a numeric quantity field."""
     # Check if PickItem has quantity field
     cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PickItem)").fetchall()]
-    if "quantity" in cols:
-        row = conn.execute(
-            "SELECT ocel_id FROM event_PickItem WHERE ocel_changed_field IS NULL LIMIT 1"
-        ).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE event_PickItem SET quantity = 'unknown' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
-                row,
-            )
-            return row[0]
-    # Fallback: use PlaceOrder if it has a numeric field
-    return None
+    if "quantity" not in cols:
+        return None
+    row = conn.execute(
+        "SELECT ocel_id FROM event_PickItem  LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE event_PickItem SET quantity = 'unknown' WHERE ocel_id = ?",
+        row,
+    )
+    return row[0]
 
 
 def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite3.Connection) -> str | None:
     """incorrect_event_attribute_datatype Hard: Put UTF-16-LE bytes in a text field."""
+    # Check if order_id column exists first
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PlaceOrder)").fetchall()]
+    if "order_id" not in cols:
+        return None
     row = conn.execute(
-        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+        "SELECT ocel_id FROM event_PlaceOrder  LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     # Put bytes in order_id field
     conn.execute(
-        "UPDATE event_PlaceOrder SET order_id = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_PlaceOrder SET order_id = ? WHERE ocel_id = ?",
         ("order".encode("utf-16-le"), row[0]),
     )
     return row[0]
@@ -287,17 +290,18 @@ def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite
 def inject_incorrect_event_attribute_value_negative_quantity_easy(conn: sqlite3.Connection) -> str | None:
     """incorrect_event_attribute_value Easy: Negative quantity in PickItem."""
     cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PickItem)").fetchall()]
-    if "quantity" in cols:
-        row = conn.execute(
-            "SELECT ocel_id FROM event_PickItem WHERE ocel_changed_field IS NULL LIMIT 1"
-        ).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE event_PickItem SET quantity = -50 WHERE ocel_id = ? AND ocel_changed_field IS NULL",
-                row,
-            )
-            return row[0]
-    return None
+    if "quantity" not in cols:
+        return None
+    row = conn.execute(
+        "SELECT ocel_id FROM event_PickItem  LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE event_PickItem SET quantity = -50 WHERE ocel_id = ?",
+        row,
+    )
+    return row[0]
 
 
 def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Connection) -> str | None:
@@ -309,7 +313,6 @@ def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Con
         JOIN event_object eo1 ON po.ocel_id = eo1.ocel_event_id
         JOIN event_object eo2 ON eo1.ocel_object_id = eo2.ocel_object_id AND eo2.ocel_qualifier = 'order'
         JOIN event_ConfirmOrder co ON eo2.ocel_event_id = co.ocel_id
-        WHERE po.ocel_changed_field IS NULL AND co.ocel_changed_field IS NULL
         LIMIT 1
     """).fetchone()
     if row is None:
@@ -317,11 +320,11 @@ def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Con
     place_id, confirm_id, place_time, confirm_time = row
     # Swap the times to create violation
     conn.execute(
-        "UPDATE event_ConfirmOrder SET ocel_time = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_ConfirmOrder SET ocel_time = ? WHERE ocel_id = ?",
         (place_time, confirm_id),
     )
     conn.execute(
-        "UPDATE event_PlaceOrder SET ocel_time = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_PlaceOrder SET ocel_time = ? WHERE ocel_id = ?",
         (confirm_time, place_id),
     )
     return confirm_id
@@ -362,12 +365,12 @@ def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> s
 def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> str | None:
     """incorrect_event_time Easy: Set event time to year 2099."""
     row = conn.execute(
-        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+        "SELECT ocel_id FROM event_PlaceOrder  LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     conn.execute(
-        "UPDATE event_PlaceOrder SET ocel_time = '2099-01-01 00:00:00' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_PlaceOrder SET ocel_time = '2099-01-01 00:00:00' WHERE ocel_id = ?",
         row,
     )
     return row[0]
@@ -376,12 +379,12 @@ def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> str | N
 def inject_incorrect_event_time_past_hard(conn: sqlite3.Connection) -> str | None:
     """incorrect_event_time Hard: Set event time to year 1900."""
     row = conn.execute(
-        "SELECT ocel_id FROM event_ConfirmOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+        "SELECT ocel_id FROM event_ConfirmOrder  LIMIT 1"
     ).fetchone()
     if row is None:
         return None
     conn.execute(
-        "UPDATE event_ConfirmOrder SET ocel_time = '1900-01-01 00:00:00' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        "UPDATE event_ConfirmOrder SET ocel_time = '1900-01-01 00:00:00' WHERE ocel_id = ?",
         row,
     )
     return row[0]
@@ -423,21 +426,21 @@ def inject_duplicate_events_on_ids_conflicting_types_hard(conn: sqlite3.Connecti
 def inject_duplicate_events_on_attributes_clone_easy(conn: sqlite3.Connection) -> str | None:
     """duplicate_events_on_attributes Easy: Clone a PlaceOrder event."""
     row = conn.execute("""
-        SELECT ocel_id, ocel_time, order_id
+        SELECT ocel_id, ocel_time
         FROM event_PlaceOrder
-        WHERE ocel_changed_field IS NULL
+
         LIMIT 1
     """).fetchone()
     if row is None:
         return None
-    orig_id, time, order_id = row
+    orig_id, time = row
     clone_id = f"{orig_id}-CLONE"
     # Insert into event table
     conn.execute("INSERT INTO event VALUES (?, ?)", (clone_id, "place order"))
     # Insert into event_PlaceOrder
     conn.execute(
-        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time, ocel_changed_field, order_id) VALUES (?, ?, NULL, ?)",
-        (clone_id, time, order_id),
+        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time) VALUES (?, ?)",
+        (clone_id, time),
     )
     return clone_id
 
@@ -445,21 +448,21 @@ def inject_duplicate_events_on_attributes_clone_easy(conn: sqlite3.Connection) -
 def inject_duplicate_events_on_attributes_clone_with_refs_hard(conn: sqlite3.Connection) -> str | None:
     """duplicate_events_on_attributes Hard: Clone event AND its event_object refs."""
     row = conn.execute("""
-        SELECT ocel_id, ocel_time, order_id
+        SELECT ocel_id, ocel_time
         FROM event_PlaceOrder
-        WHERE ocel_changed_field IS NULL
+
         LIMIT 1 OFFSET 1
     """).fetchone()
     if row is None:
         return None
-    orig_id, time, order_id = row
+    orig_id, time = row
     clone_id = f"{orig_id}-CLONE"
     # Insert into event table
     conn.execute("INSERT INTO event VALUES (?, ?)", (clone_id, "place order"))
     # Insert into event_PlaceOrder
     conn.execute(
-        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time, ocel_changed_field, order_id) VALUES (?, ?, NULL, ?)",
-        (clone_id, time, order_id),
+        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time) VALUES (?, ?)",
+        (clone_id, time),
     )
     # Clone event_object refs
     conn.execute(
@@ -476,13 +479,14 @@ def inject_duplicate_events_on_attributes_clone_with_refs_hard(conn: sqlite3.Con
 
 
 def inject_missing_event_attribute_drop_order_id_easy(conn: sqlite3.Connection) -> str | None:
-    """missing_event_attribute Easy: Drop order_id column from event_PlaceOrder."""
-    # This is a schema change - need to check if it's reversible
-    # For now, we'll mark this as not implemented in the registry
+    """missing_event_attribute Easy: Drop order_id column from event_PlaceOrder.
+
+    Schema changes not supported - returns None."""
     return None
 
 
 def inject_missing_event_attribute_drop_optional_hard(conn: sqlite3.Connection) -> str | None:
-    """missing_event_attribute Hard: Drop optional column from event table."""
-    # Schema change - not implemented for now
+    """missing_event_attribute Hard: Drop optional column from event table.
+
+    Schema changes not supported - returns None."""
     return None
