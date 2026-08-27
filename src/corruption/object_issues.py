@@ -266,3 +266,45 @@ def inject_duplicate_objects_on_attributes_clone_order_and_referenced(conn: sqli
         (clone, original),
     )
     return [original, clone]
+
+
+# ---------------------------------------------------------------------------
+# incorrect_object_attribute_value (LLM detection, Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_object_attribute_value_negative_weight_easy(conn: sqlite3.Connection) -> str | None:
+    """incorrect_object_attribute_value Easy: Set product weight to -999 (obviously wrong)."""
+    n = conn.execute(
+        'UPDATE object_Products SET weight = -999 WHERE ocel_id = ? '
+        'AND ocel_changed_field IS NULL',
+        ("iPad Pro",),
+    ).rowcount
+    return "iPad Pro" if n > 0 else None
+
+
+def inject_incorrect_object_attribute_value_implausible_weight_hard(conn: sqlite3.Connection) -> str | None:
+    """incorrect_object_attribute_value Hard: Set iPhone weight to 50000g (plausible format but wrong)."""
+    n = conn.execute(
+        'UPDATE object_Products SET weight = 50000 WHERE ocel_id = ? '
+        'AND ocel_changed_field IS NULL',
+        ("iPhone 13",),
+    ).rowcount
+    return "iPhone 13" if n > 0 else None
+
+
+# ---------------------------------------------------------------------------
+# missing_object_attribute (LLM detection, Easy/Hard)
+# Note: These require schema changes (DROP COLUMN) which are complex in SQLite.
+# Marking as not implemented for now - would need ALTER TABLE workarounds.
+# ---------------------------------------------------------------------------
+
+
+def inject_missing_object_attribute_drop_price_easy(conn: sqlite3.Connection) -> str | None:
+    """missing_object_attribute Easy: Drop price column from Products (schema change - not implemented)."""
+    return None
+
+
+def inject_missing_object_attribute_drop_optional_hard(conn: sqlite3.Connection) -> str | None:
+    """missing_object_attribute Hard: Drop optional column (schema change - not implemented)."""
+    return None

@@ -193,3 +193,296 @@ def inject_missing_event_type_whitespace_package_hard(conn: sqlite3.Connection) 
         return None
     conn.execute("UPDATE event SET ocel_type = '   ' WHERE ocel_id = ?", row)
     return row[0]
+
+
+# ---------------------------------------------------------------------------
+# missing_event_attribute_value (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_missing_event_attribute_value_null_order_id_easy(conn: sqlite3.Connection) -> str | None:
+    """missing_event_attribute_value Easy: NULL an order_id in event_PlaceOrder.
+
+    Easy because PlaceOrder is common and order_id is obviously required."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE event_PlaceOrder SET order_id = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        row,
+    )
+    return row[0]
+
+
+def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connection) -> str | None:
+    """missing_event_attribute_value Hard: NULL a reason in event_ItemOutOfStock.
+
+    Hard because ItemOutOfStock is rare and reason is a less obvious required field."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event_ItemOutOfStock WHERE ocel_changed_field IS NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    # Check if reason column exists first
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(event_ItemOutOfStock)").fetchall()]
+    if "reason" in cols:
+        conn.execute(
+            "UPDATE event_ItemOutOfStock SET reason = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+            row,
+        )
+        return row[0]
+    # Fallback: null item_id instead
+    conn.execute(
+        "UPDATE event_ItemOutOfStock SET item_id = NULL WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        row,
+    )
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# incorrect_event_attribute_datatype (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_event_attribute_datatype_string_in_quantity_easy(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_attribute_datatype Easy: Put 'unknown' in a numeric quantity field."""
+    # Check if PickItem has quantity field
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PickItem)").fetchall()]
+    if "quantity" in cols:
+        row = conn.execute(
+            "SELECT ocel_id FROM event_PickItem WHERE ocel_changed_field IS NULL LIMIT 1"
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE event_PickItem SET quantity = 'unknown' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+                row,
+            )
+            return row[0]
+    # Fallback: use PlaceOrder if it has a numeric field
+    return None
+
+
+def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_attribute_datatype Hard: Put UTF-16-LE bytes in a text field."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    # Put bytes in order_id field
+    conn.execute(
+        "UPDATE event_PlaceOrder SET order_id = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        ("order".encode("utf-16-le"), row[0]),
+    )
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# incorrect_event_attribute_value (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_event_attribute_value_negative_quantity_easy(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_attribute_value Easy: Negative quantity in PickItem."""
+    cols = [c[1] for c in conn.execute("PRAGMA table_info(event_PickItem)").fetchall()]
+    if "quantity" in cols:
+        row = conn.execute(
+            "SELECT ocel_id FROM event_PickItem WHERE ocel_changed_field IS NULL LIMIT 1"
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE event_PickItem SET quantity = -50 WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+                row,
+            )
+            return row[0]
+    return None
+
+
+def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_attribute_value Hard: ConfirmOrder before PlaceOrder (temporal violation)."""
+    # Find a PlaceOrder and its corresponding ConfirmOrder
+    row = conn.execute("""
+        SELECT po.ocel_id as place_id, co.ocel_id as confirm_id, po.ocel_time, co.ocel_time
+        FROM event_PlaceOrder po
+        JOIN event_object eo1 ON po.ocel_id = eo1.ocel_event_id
+        JOIN event_object eo2 ON eo1.ocel_object_id = eo2.ocel_object_id AND eo2.ocel_qualifier = 'order'
+        JOIN event_ConfirmOrder co ON eo2.ocel_event_id = co.ocel_id
+        WHERE po.ocel_changed_field IS NULL AND co.ocel_changed_field IS NULL
+        LIMIT 1
+    """).fetchone()
+    if row is None:
+        return None
+    place_id, confirm_id, place_time, confirm_time = row
+    # Swap the times to create violation
+    conn.execute(
+        "UPDATE event_ConfirmOrder SET ocel_time = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        (place_time, confirm_id),
+    )
+    conn.execute(
+        "UPDATE event_PlaceOrder SET ocel_time = ? WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        (confirm_time, place_id),
+    )
+    return confirm_id
+
+
+# ---------------------------------------------------------------------------
+# incorrect_event_type (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_event_type_swap_easy(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_type Easy: Change PlaceOrder type to PickItem (completely wrong)."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event WHERE ocel_type = 'place order' LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE event SET ocel_type = 'pick item' WHERE ocel_id = ?", row)
+    return row[0]
+
+
+def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_type Hard: Change PlaceOrder to placeorder (case variant)."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event WHERE ocel_type = 'place order' LIMIT 1 OFFSET 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE event SET ocel_type = 'placeorder' WHERE ocel_id = ?", row)
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# incorrect_event_time (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_time Easy: Set event time to year 2099."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event_PlaceOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE event_PlaceOrder SET ocel_time = '2099-01-01 00:00:00' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        row,
+    )
+    return row[0]
+
+
+def inject_incorrect_event_time_past_hard(conn: sqlite3.Connection) -> str | None:
+    """incorrect_event_time Hard: Set event time to year 1900."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event_ConfirmOrder WHERE ocel_changed_field IS NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE event_ConfirmOrder SET ocel_time = '1900-01-01 00:00:00' WHERE ocel_id = ? AND ocel_changed_field IS NULL",
+        row,
+    )
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# duplicate_events_on_ids (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_duplicate_events_on_ids_easy(conn: sqlite3.Connection) -> str | None:
+    """duplicate_events_on_ids Easy: Duplicate an event row identically."""
+    row = conn.execute(
+        "SELECT ocel_id, ocel_type FROM event WHERE ocel_type = 'place order' LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("INSERT INTO event VALUES (?, ?)", row)
+    return row[0]
+
+
+def inject_duplicate_events_on_ids_conflicting_types_hard(conn: sqlite3.Connection) -> str | None:
+    """duplicate_events_on_ids Hard: Duplicate event with conflicting type."""
+    row = conn.execute(
+        "SELECT ocel_id FROM event WHERE ocel_type = 'place order' LIMIT 1 OFFSET 2"
+    ).fetchone()
+    if row is None:
+        return None
+    # Insert duplicate with different type
+    conn.execute("INSERT INTO event VALUES (?, ?)", (row[0], "pick item"))
+    return row[0]
+
+
+# ---------------------------------------------------------------------------
+# duplicate_events_on_attributes (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_duplicate_events_on_attributes_clone_easy(conn: sqlite3.Connection) -> str | None:
+    """duplicate_events_on_attributes Easy: Clone a PlaceOrder event."""
+    row = conn.execute("""
+        SELECT ocel_id, ocel_time, order_id
+        FROM event_PlaceOrder
+        WHERE ocel_changed_field IS NULL
+        LIMIT 1
+    """).fetchone()
+    if row is None:
+        return None
+    orig_id, time, order_id = row
+    clone_id = f"{orig_id}-CLONE"
+    # Insert into event table
+    conn.execute("INSERT INTO event VALUES (?, ?)", (clone_id, "place order"))
+    # Insert into event_PlaceOrder
+    conn.execute(
+        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time, ocel_changed_field, order_id) VALUES (?, ?, NULL, ?)",
+        (clone_id, time, order_id),
+    )
+    return clone_id
+
+
+def inject_duplicate_events_on_attributes_clone_with_refs_hard(conn: sqlite3.Connection) -> str | None:
+    """duplicate_events_on_attributes Hard: Clone event AND its event_object refs."""
+    row = conn.execute("""
+        SELECT ocel_id, ocel_time, order_id
+        FROM event_PlaceOrder
+        WHERE ocel_changed_field IS NULL
+        LIMIT 1 OFFSET 1
+    """).fetchone()
+    if row is None:
+        return None
+    orig_id, time, order_id = row
+    clone_id = f"{orig_id}-CLONE"
+    # Insert into event table
+    conn.execute("INSERT INTO event VALUES (?, ?)", (clone_id, "place order"))
+    # Insert into event_PlaceOrder
+    conn.execute(
+        "INSERT INTO event_PlaceOrder (ocel_id, ocel_time, ocel_changed_field, order_id) VALUES (?, ?, NULL, ?)",
+        (clone_id, time, order_id),
+    )
+    # Clone event_object refs
+    conn.execute(
+        "INSERT INTO event_object (ocel_event_id, ocel_object_id, ocel_qualifier) "
+        "SELECT ?, ocel_object_id, ocel_qualifier FROM event_object WHERE ocel_event_id = ?",
+        (clone_id, orig_id),
+    )
+    return clone_id
+
+
+# ---------------------------------------------------------------------------
+# missing_event_attribute (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_missing_event_attribute_drop_order_id_easy(conn: sqlite3.Connection) -> str | None:
+    """missing_event_attribute Easy: Drop order_id column from event_PlaceOrder."""
+    # This is a schema change - need to check if it's reversible
+    # For now, we'll mark this as not implemented in the registry
+    return None
+
+
+def inject_missing_event_attribute_drop_optional_hard(conn: sqlite3.Connection) -> str | None:
+    """missing_event_attribute Hard: Drop optional column from event table."""
+    # Schema change - not implemented for now
+    return None

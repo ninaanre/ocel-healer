@@ -353,3 +353,223 @@ def inject_duplicate_e2o_relations_sales_person_hard(
     if not ev:
         return "", "", ""
     return _insert_e2o_copies(conn, ev[0], ev[1], "sales person", extras=2)
+
+
+# ---------------------------------------------------------------------------
+# incorrect_e2o_relationship_target (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_e2o_relationship_target_wrong_order_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str]:
+    """incorrect_e2o_relationship_target Easy: PlaceOrder event connected to wrong order.
+
+    Easy because the event type and qualifier clearly indicate which object it should target,
+    but it's connected to a completely different order."""
+    # Find a PlaceOrder event and swap its order connection
+    row = conn.execute("""
+        SELECT eo.ocel_event_id, eo.ocel_object_id, o2.ocel_id as wrong_order
+        FROM event_object eo
+        JOIN event e ON eo.ocel_event_id = e.ocel_id
+        JOIN object o1 ON eo.ocel_object_id = o1.ocel_id
+        JOIN object o2 ON o2.ocel_type = 'orders' AND o2.ocel_id != o1.ocel_id
+        WHERE e.ocel_type = 'place order' AND eo.ocel_qualifier = 'order'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", ""
+    event_id, correct_order, wrong_order = row
+    # Update to point to wrong order
+    conn.execute(
+        "UPDATE event_object SET ocel_object_id = ? WHERE ocel_event_id = ? AND ocel_qualifier = 'order'",
+        (wrong_order, event_id),
+    )
+    return event_id, wrong_order
+
+
+def inject_incorrect_e2o_relationship_target_plausible_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str]:
+    """incorrect_e2o_relationship_target Hard: PickItem event connected to plausible but wrong item.
+
+    Hard because both items might be in the same order, making it harder to detect."""
+    # Find a PickItem event and swap to a different item
+    row = conn.execute("""
+        SELECT eo.ocel_event_id, eo.ocel_object_id, o2.ocel_id as wrong_item
+        FROM event_object eo
+        JOIN event e ON eo.ocel_event_id = e.ocel_id
+        JOIN object o1 ON eo.ocel_object_id = o1.ocel_id
+        JOIN object o2 ON o2.ocel_type = 'items' AND o2.ocel_id != o1.ocel_id
+        WHERE e.ocel_type = 'pick item' AND eo.ocel_qualifier = 'item'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", ""
+    event_id, correct_item, wrong_item = row
+    # Update to point to wrong item
+    conn.execute(
+        "UPDATE event_object SET ocel_object_id = ? WHERE ocel_event_id = ? AND ocel_qualifier = 'item'",
+        (wrong_item, event_id),
+    )
+    return event_id, wrong_item
+
+
+# ---------------------------------------------------------------------------
+# incorrect_e2o_relationship_qualifier (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_e2o_relationship_qualifier_obvious_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """incorrect_e2o_relationship_qualifier Easy: Change 'order' qualifier to 'item' (obviously wrong).
+
+    Easy because a PlaceOrder event should connect to an order with 'order' qualifier, not 'item'."""
+    row = conn.execute("""
+        SELECT eo.ocel_event_id, eo.ocel_object_id, eo.ocel_qualifier
+        FROM event_object eo
+        JOIN event e ON eo.ocel_event_id = e.ocel_id
+        WHERE e.ocel_type = 'place order' AND eo.ocel_qualifier = 'order'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", "", ""
+    event_id, object_id, old_qual = row
+    new_qual = "item"
+    conn.execute(
+        "UPDATE event_object SET ocel_qualifier = ? WHERE ocel_event_id = ? AND ocel_object_id = ?",
+        (new_qual, event_id, object_id),
+    )
+    return event_id, object_id, new_qual
+
+
+def inject_incorrect_e2o_relationship_qualifier_subtle_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """incorrect_e2o_relationship_qualifier Hard: Change 'sales person' to 'salesperson' (typo variant).
+
+    Hard because it's a plausible typo that might not be caught without domain knowledge."""
+    row = conn.execute("""
+        SELECT ocel_event_id, ocel_object_id, ocel_qualifier
+        FROM event_object
+        WHERE ocel_qualifier = 'sales person'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", "", ""
+    event_id, object_id, old_qual = row
+    new_qual = "salesperson"
+    conn.execute(
+        "UPDATE event_object SET ocel_qualifier = ? WHERE ocel_event_id = ? AND ocel_object_id = ?",
+        (new_qual, event_id, object_id),
+    )
+    return event_id, object_id, new_qual
+
+
+# ---------------------------------------------------------------------------
+# incorrect_o2o_relationship_target (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_o2o_relationship_target_wrong_item_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str]:
+    """incorrect_o2o_relationship_target Easy: Order 'comprises' wrong item (obviously mismatched).
+
+    Easy because the order and item are completely unrelated."""
+    # Find an order→item comprises relation and swap the target
+    row = conn.execute("""
+        SELECT oo.ocel_source_id, oo.ocel_target_id, o2.ocel_id as wrong_item
+        FROM object_object oo
+        JOIN object o1 ON oo.ocel_source_id = o1.ocel_id
+        JOIN object o2 ON o2.ocel_type = 'items' AND o2.ocel_id != oo.ocel_target_id
+        WHERE oo.ocel_qualifier = 'comprises' AND o1.ocel_type = 'orders'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", ""
+    source_id, correct_target, wrong_target = row
+    # Update to point to wrong item
+    conn.execute(
+        "UPDATE object_object SET ocel_target_id = ? WHERE ocel_source_id = ? AND ocel_target_id = ? AND ocel_qualifier = 'comprises'",
+        (wrong_target, source_id, correct_target),
+    )
+    return source_id, wrong_target
+
+
+def inject_incorrect_o2o_relationship_target_plausible_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str]:
+    """incorrect_o2o_relationship_target Hard: Customer 'places' wrong order (plausible but incorrect).
+
+    Hard because the customer exists and the order exists, making it seem valid."""
+    # Find a customer→order places relation and swap the target
+    row = conn.execute("""
+        SELECT oo.ocel_source_id, oo.ocel_target_id, o2.ocel_id as wrong_order
+        FROM object_object oo
+        JOIN object o1 ON oo.ocel_source_id = o1.ocel_id
+        JOIN object o2 ON o2.ocel_type = 'orders' AND o2.ocel_id != oo.ocel_target_id
+        WHERE oo.ocel_qualifier = 'places' AND o1.ocel_type = 'customers'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", ""
+    source_id, correct_target, wrong_target = row
+    # Update to point to wrong order
+    conn.execute(
+        "UPDATE object_object SET ocel_target_id = ? WHERE ocel_source_id = ? AND ocel_target_id = ? AND ocel_qualifier = 'places'",
+        (wrong_target, source_id, correct_target),
+    )
+    return source_id, wrong_target
+
+
+# ---------------------------------------------------------------------------
+# incorrect_o2o_relationship_qualifier (Easy/Hard)
+# ---------------------------------------------------------------------------
+
+
+def inject_incorrect_o2o_relationship_qualifier_wrong_verb_easy(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """incorrect_o2o_relationship_qualifier Easy: Change 'comprises' to 'contains' (wrong verb).
+
+    Easy because 'comprises' is the standard qualifier for order→item, not 'contains'."""
+    row = conn.execute("""
+        SELECT ocel_source_id, ocel_target_id, ocel_qualifier
+        FROM object_object
+        WHERE ocel_qualifier = 'comprises'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", "", ""
+    source_id, target_id, old_qual = row
+    new_qual = "contains"
+    conn.execute(
+        "UPDATE object_object SET ocel_qualifier = ? WHERE ocel_source_id = ? AND ocel_target_id = ? AND ocel_qualifier = ?",
+        (new_qual, source_id, target_id, old_qual),
+    )
+    return source_id, target_id, new_qual
+
+
+def inject_incorrect_o2o_relationship_qualifier_typo_hard(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, str]:
+    """incorrect_o2o_relationship_qualifier Hard: Change 'primarySalesRep' to 'primarySalesRepresentative' (verbose variant).
+
+    Hard because it's a plausible expansion that might be used inconsistently."""
+    row = conn.execute("""
+        SELECT ocel_source_id, ocel_target_id, ocel_qualifier
+        FROM object_object
+        WHERE ocel_qualifier = 'primarySalesRep'
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return "", "", ""
+    source_id, target_id, old_qual = row
+    new_qual = "primarySalesRepresentative"
+    conn.execute(
+        "UPDATE object_object SET ocel_qualifier = ? WHERE ocel_source_id = ? AND ocel_target_id = ? AND ocel_qualifier = ?",
+        (new_qual, source_id, target_id, old_qual),
+    )
+    return source_id, target_id, new_qual
