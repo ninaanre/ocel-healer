@@ -19,6 +19,10 @@ from src.corruption._common import (
     _null_type_for,
     inject_missing_attribute_value,
 )
+from .p2p_mappings import (
+    get_p2p_object_type,
+    get_p2p_object_table,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,20 +67,40 @@ def inject_incorrect_object_type(
 
 
 def inject_missing_object_type_null_employee(conn: sqlite3.Connection) -> str | None:
-    """missing_object_type Easy: NULL the ocel_type of a specific,
-    well-known employee."""
-    return _null_type_for(conn, "Wil van der Aalst", set_to=None)
+    """missing_object_type Easy: NULL the ocel_type of a payment object."""
+    obj_type = get_p2p_object_type("employees")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE object SET ocel_type = NULL WHERE ocel_id = ?", row)
+    return row[0]
 
 
 def inject_missing_object_type_empty_string_order(conn: sqlite3.Connection) -> str | None:
-    """missing_object_type Medium: Set ocel_type to '' on a specific order."""
-    return _null_type_for(conn, "o-990010", set_to="")
+    """missing_object_type Medium: Set ocel_type to '' on a purchase order."""
+    obj_type = get_p2p_object_type("orders")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE object SET ocel_type = '' WHERE ocel_id = ?", row)
+    return row[0]
 
 
 def inject_missing_object_type_whitespace_product(conn: sqlite3.Connection) -> str | None:
     """missing_object_type Hard: Set ocel_type to a whitespace-only string
-    on a product."""
-    return _null_type_for(conn, "MacBook Pro", set_to="   ")
+    on a material."""
+    obj_type = get_p2p_object_type("products")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE object SET ocel_type = '   ' WHERE ocel_id = ?", row)
+    return row[0]
 
 
 # ---------------------------------------------------------------------------
@@ -85,30 +109,48 @@ def inject_missing_object_type_whitespace_product(conn: sqlite3.Connection) -> s
 
 
 def inject_missing_attribute_value_null_product_weight(conn: sqlite3.Connection) -> list[str]:
-    """missing_attribute_value Easy: NULL the weight of `iPhone 8`
-    (id-as-name hint applies)."""
-    return inject_missing_attribute_value(
-        conn, "object_Products", "weight", ocel_ids=["iPhone 8"]
+    """missing_attribute_value Easy: NULL the weight of a material."""
+    table = get_p2p_object_table("object_Products")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE QuantityEKPOMENGE IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return []
+    conn.execute(
+        f"UPDATE {table} SET QuantityEKPOMENGE = NULL WHERE ocel_id = ?",
+        row,
     )
+    return [row[0]]
 
 
 def inject_missing_attribute_value_empty_string_role(conn: sqlite3.Connection) -> list[str]:
-    """missing_attribute_value Medium: Set `role` to '' for
-    `Christine von Dobbert`."""
-    n = conn.execute(
-        'UPDATE object_Employees SET role = \'\' WHERE ocel_id = ? '
-        'AND role IS NOT NULL',
-        ("Christine von Dobbert",),
-    ).rowcount
-    return ["Christine von Dobbert"] if n > 0 else []
+    """missing_attribute_value Medium: Set payment amount to empty string."""
+    table = get_p2p_object_table("object_employees")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE AmountDMBTR IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return []
+    conn.execute(
+        f"UPDATE {table} SET AmountDMBTR = '' WHERE ocel_id = ?",
+        row,
+    )
+    return [row[0]]
 
 
 def inject_missing_attribute_value_null_order_price(conn: sqlite3.Connection) -> list[str]:
-    """missing_attribute_value Hard: NULL the initial `price` of order
-    `o-990050`."""
-    return inject_missing_attribute_value(
-        conn, "object_Orders", "price", ocel_ids=["o-990050"]
+    """missing_attribute_value Hard: NULL vendor field in purchase order."""
+    table = get_p2p_object_table("object_orders")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE VendorEKKOLIFNR IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return []
+    conn.execute(
+        f"UPDATE {table} SET VendorEKKOLIFNR = NULL WHERE ocel_id = ?",
+        row,
     )
+    return [row[0]]
 
 
 # ---------------------------------------------------------------------------
@@ -117,21 +159,40 @@ def inject_missing_attribute_value_null_order_price(conn: sqlite3.Connection) ->
 
 
 def inject_incorrect_object_type_swap_order_to_employee(conn: sqlite3.Connection) -> str | None:
-    """incorrect_object_type Easy: Retype order `o-990001` as `employees`."""
-    return inject_incorrect_object_type(conn, "o-990001", "employees")
+    """incorrect_object_type Easy: Retype purchase_order as payment."""
+    orders_type = get_p2p_object_type("orders")
+    employee_type = get_p2p_object_type("employees")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (orders_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    return inject_incorrect_object_type(conn, row[0], employee_type)
 
 
 def inject_incorrect_object_type_swap_item_to_product(conn: sqlite3.Connection) -> str | None:
-    """incorrect_object_type Medium: Retype item `i-880100` as `products`."""
-    return inject_incorrect_object_type(conn, "i-880100", "products")
+    """incorrect_object_type Medium: Retype material as quotation."""
+    items_type = get_p2p_object_type("items")
+    products_type = get_p2p_object_type("products")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (items_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    # Both map to 'material' in P2P, so use quotation as different type
+    return inject_incorrect_object_type(conn, row[0], "quotation")
 
 
 def inject_incorrect_object_type_case_variant_customers(conn: sqlite3.Connection) -> str | None:
-    """incorrect_object_type Hard: Retype a customer as `CUSTOMERS`
-    (case variant)."""
-    return inject_incorrect_object_type(
-        conn, "Carpathian Financial Services plc", "CUSTOMERS"
-    )
+    """incorrect_object_type Hard: Retype purchase_requisition with case variant."""
+    customers_type = get_p2p_object_type("customers")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    # Create case variant - uppercase
+    return inject_incorrect_object_type(conn, row[0], "PURCHASE_REQUISITION")
 
 
 # ---------------------------------------------------------------------------
@@ -146,33 +207,49 @@ def inject_incorrect_object_type_case_variant_customers(conn: sqlite3.Connection
 
 def inject_incorrect_attribute_datatype_string_in_weight(conn: sqlite3.Connection) -> str | None:
     """incorrect_attribute_datatype Easy: Put `'unknown'` into
-    `object_Products.weight` (REAL)."""
-    n = conn.execute(
-        'UPDATE object_Products SET weight = ? WHERE ocel_id = ?',
-        ("unknown", "iPad Air"),
-    ).rowcount
-    return "iPad Air" if n > 0 else None
+    material NetPrice (REAL)."""
+    table = get_p2p_object_table("object_Products")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE NetPriceEKPONETPR IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        f"UPDATE {table} SET NetPriceEKPONETPR = ? WHERE ocel_id = ?",
+        ("unknown", row[0]),
+    )
+    return row[0]
 
 
 def inject_incorrect_attribute_datatype_string_in_order_price(conn: sqlite3.Connection) -> str | None:
-    """incorrect_attribute_datatype Medium: Put `'TBD'` into
-    `object_Orders.price` (REAL)."""
-    n = conn.execute(
-        'UPDATE object_Orders SET price = ? WHERE ocel_id = ?',
-        ("TBD", "o-990200"),
-    ).rowcount
-    return "o-990200" if n > 0 else None
+    """incorrect_attribute_datatype Medium: Put 'TBD' into purchase order vendor (TEXT expecting code)."""
+    table = get_p2p_object_table("object_Orders")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE VendorEKKOLIFNR IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        f"UPDATE {table} SET VendorEKKOLIFNR = ? WHERE ocel_id = ?",
+        ("TBD", row[0]),
+    )
+    return row[0]
 
 
 def inject_incorrect_attribute_datatype_blob_in_role(conn: sqlite3.Connection) -> str | None:
     """incorrect_attribute_datatype Hard: Put UTF-16-LE bytes into
-    `object_Employees.role` (TEXT) — the shape you'd see if a legacy
-    system exported the role column without decoding it first."""
-    n = conn.execute(
-        'UPDATE object_Employees SET role = ? WHERE ocel_id = ?',
-        ("Sales".encode("utf-16-le"), "Jan Niklas Adams"),
-    ).rowcount
-    return "Jan Niklas Adams" if n > 0 else None
+    payment AmountDMBTR field (TEXT)."""
+    table = get_p2p_object_table("object_employees")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE AmountDMBTR IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        f"UPDATE {table} SET AmountDMBTR = ? WHERE ocel_id = ?",
+        ("100.00".encode("utf-16-le"), row[0]),
+    )
+    return row[0]
 
 
 # ---------------------------------------------------------------------------
@@ -181,24 +258,40 @@ def inject_incorrect_attribute_datatype_blob_in_role(conn: sqlite3.Connection) -
 
 
 def inject_duplicate_objects_on_ids_product(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_ids Easy: Duplicate the (`Echo Dot`, `products`)
-    row in `object`."""
-    return inject_duplicate_objects_on_ids(conn, ocel_id="Echo Dot")
+    """duplicate_objects_on_ids Easy: Duplicate a material row in object."""
+    products_type = get_p2p_object_type("products")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (products_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    return inject_duplicate_objects_on_ids(conn, ocel_id=row[0])
 
 
 def inject_duplicate_objects_on_ids_conflicting_types(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_ids Medium: Insert `('o-990300', 'items')` next
-    to the real order row."""
-    conn.execute("INSERT INTO object VALUES (?, ?)", ("o-990300", "items"))
-    return "o-990300"
+    """duplicate_objects_on_ids Medium: Insert purchase_order with conflicting material type."""
+    orders_type = get_p2p_object_type("orders")
+    items_type = get_p2p_object_type("items")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (orders_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("INSERT INTO object VALUES (?, ?)", (row[0], items_type))
+    return row[0]
 
 
 def inject_duplicate_objects_on_ids_triple_null_type(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_ids Hard: Add two extra rows for one customer id,
-    one with NULL type."""
-    ocel_id = "AlpenTech Innovations AG"
+    """duplicate_objects_on_ids Hard: Add two extra rows for one purchase requisition, one with NULL type."""
+    customers_type = get_p2p_object_type("customers")
+    row = conn.execute(
+        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
+    ).fetchone()
+    if row is None:
+        return None
+    ocel_id = row[0]
     conn.execute("INSERT INTO object VALUES (?, ?)", (ocel_id, None))
-    conn.execute("INSERT INTO object VALUES (?, ?)", (ocel_id, "customers"))
+    conn.execute("INSERT INTO object VALUES (?, ?)", (ocel_id, customers_type))
     return ocel_id
 
 
@@ -208,52 +301,72 @@ def inject_duplicate_objects_on_ids_triple_null_type(conn: sqlite3.Connection) -
 
 
 def inject_duplicate_objects_on_attributes_clone_product(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_attributes Easy: Clone `Echo Dot`'s initial-state
+    """duplicate_objects_on_attributes Easy: Clone a material's initial-state
     row under a fabricated id."""
+    products_type = get_p2p_object_type("products")
+    table = get_p2p_object_table("object_Products")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
     return _clone_object_row(
         conn,
-        source_id="Echo Dot",
-        clone_id="products:CLONE_ECHO_DOT",
-        ocel_type="products",
-        table="object_Products",
+        source_id=row[0],
+        clone_id=f"{row[0]}-CLONE",
+        ocel_type=products_type,
+        table=table,
     )
 
 
 def inject_duplicate_objects_on_attributes_clone_employee(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_attributes Medium: Insert an employee and a
-    same-name `(dup)` copy sharing an off-catalogue `Consulting` role —
-    the shape you'd see when a contractor was re-created as a second
-    master-data record instead of being merged with the first."""
-    original = "Ada Nowak"
-    clone = "Ada Nowak (dup)"
+    """duplicate_objects_on_attributes Medium: Insert two payment objects with
+    same attributes - simulating duplicate master data records."""
+    employee_type = get_p2p_object_type("employees")
+    table = get_p2p_object_table("object_employees")
+
+    original = "payment:original"
+    clone = "payment:clone"
     fingerprint_time = "2023-04-03 01:00:00"
-    role = "Consulting"
-    conn.execute("INSERT INTO object VALUES (?, ?)", (original, "employees"))
-    conn.execute("INSERT INTO object VALUES (?, ?)", (clone, "employees"))
+    amount = "1000.00"
+
+    conn.execute("INSERT INTO object VALUES (?, ?)", (original, employee_type))
+    conn.execute("INSERT INTO object VALUES (?, ?)", (clone, employee_type))
     conn.execute(
-        'INSERT INTO object_Employees (ocel_id, ocel_time, ocel_changed_field, role) '
+        f'INSERT INTO {table} (ocel_id, ocel_time, ocel_changed_field, AmountDMBTR) '
         "VALUES (?, ?, NULL, ?)",
-        (original, fingerprint_time, role),
+        (original, fingerprint_time, amount),
     )
     conn.execute(
-        'INSERT INTO object_Employees (ocel_id, ocel_time, ocel_changed_field, role) '
+        f'INSERT INTO {table} (ocel_id, ocel_time, ocel_changed_field, AmountDMBTR) '
         "VALUES (?, ?, NULL, ?)",
-        (clone, fingerprint_time, role),
+        (clone, fingerprint_time, amount),
     )
     return clone
 
 
 def inject_duplicate_objects_on_attributes_clone_order_and_referenced(conn: sqlite3.Connection) -> list[str]:
-    """duplicate_objects_on_attributes Hard: Clone an order AND copy its
-    `event_object` rows."""
-    original = "o-990500"
-    clone = "o-990500-DUP"
+    """duplicate_objects_on_attributes Hard: Clone a purchase order AND copy its
+    event_object rows."""
+    orders_type = get_p2p_object_type("orders")
+    table = get_p2p_object_table("object_orders")
+    qualifier = get_p2p_object_type("orders")
+
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return []
+
+    original = row[0]
+    clone = f"{original}-DUP"
+
     if not _clone_object_row(
         conn,
         source_id=original,
         clone_id=clone,
-        ocel_type="orders",
-        table="object_Orders",
+        ocel_type=orders_type,
+        table=table,
     ):
         return []
     conn.execute(
@@ -271,21 +384,33 @@ def inject_duplicate_objects_on_attributes_clone_order_and_referenced(conn: sqli
 
 
 def inject_incorrect_object_attribute_value_negative_weight_easy(conn: sqlite3.Connection) -> str | None:
-    """incorrect_object_attribute_value Easy: Set product weight to -999 (obviously wrong)."""
-    n = conn.execute(
-        'UPDATE object_Products SET weight = -999 WHERE ocel_id = ?',
-        ("iPad Pro",),
-    ).rowcount
-    return "iPad Pro" if n > 0 else None
+    """incorrect_object_attribute_value Easy: Set material quantity to -999 (obviously wrong)."""
+    table = get_p2p_object_table("object_Products")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE QuantityEKPOMENGE > 0 LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        f'UPDATE {table} SET QuantityEKPOMENGE = -999 WHERE ocel_id = ?',
+        row,
+    )
+    return row[0]
 
 
 def inject_incorrect_object_attribute_value_implausible_weight_hard(conn: sqlite3.Connection) -> str | None:
-    """incorrect_object_attribute_value Hard: Set iPhone weight to 50000g (plausible format but wrong)."""
-    n = conn.execute(
-        'UPDATE object_Products SET weight = 50000 WHERE ocel_id = ?',
-        ("iPhone 13",),
-    ).rowcount
-    return "iPhone 13" if n > 0 else None
+    """incorrect_object_attribute_value Hard: Set material NetPrice to 999999 (plausible format but wrong)."""
+    table = get_p2p_object_table("object_Products")
+    row = conn.execute(
+        f"SELECT ocel_id FROM {table} WHERE NetPriceEKPONETPR > 0 AND NetPriceEKPONETPR < 1000 LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        f'UPDATE {table} SET NetPriceEKPONETPR = 999999 WHERE ocel_id = ?',
+        row,
+    )
+    return row[0]
 
 
 # ---------------------------------------------------------------------------
