@@ -8,11 +8,9 @@ object also becomes dangling), and that cascade grows/shrinks with the
 dataset. The `missing_object` injectors also add rows that trip
 ``dangling_e2o_relationship`` — this is intentional: the same violation
 surfaces in both detectors and the dashboard routes it to the appropriate
-grid cell. The new ``missing_event`` injectors are analogous: they trip
+grid cell. The `missing_event` injectors are analogous: they trip
 both ``missing_event`` and ``dangling_e2o_relationship`` (from opposite
-sides of the same E2O row).  Regression on the `legacy` level is asserted
-with a hardcoded snapshot so accidental changes to the pre-existing dirty
-output are caught.
+sides of the same E2O row).
 """
 
 from __future__ import annotations
@@ -34,53 +32,37 @@ RULE_DETECTORS = (
     "incorrect_attribute_datatype",
     "dangling_o2o_relationship",
     "dangling_e2o_relationship",
+    "duplicate_o2o_relations",
+    "o2o_self_loop",
+    "duplicate_e2o_relations",
 )
+# `missing_event_attribute_value` and `incorrect_event_attribute_datatype`
+# exist as rule detectors but aren't in RULE_DETECTORS: the corruption
+# injectors don't yet produce event-attribute defects. Adding those
+# injectors would extend both this tuple and the coverage tests below.
 
 # Counts on the pristine clean DB.  Only `duplicate_objects_on_attributes` is
 # non-zero — OCEL change rows legitimately share (time, changed_field, value)
 # fingerprints, so the detector picks them up as attribute duplicates.
 CLEAN_BASELINE = {
-    "missing_object_type":              0,
-    "missing_attribute_value":          0,
-    "missing_event":                    0,
-    "missing_event_type":               0,
-    "missing_event_timestamp":          0,
-    "missing_object":                   0,
-    "duplicate_objects_on_ids":         0,
-    "duplicate_objects_on_attributes":  384,
-    "incorrect_attribute_datatype":     0,
-    "dangling_o2o_relationship":        0,
-    "dangling_e2o_relationship":        0,
-}
-
-# Snapshot of the counts produced by the pre-tier `corrupt_database` body,
-# captured after regenerating the dirty DB fresh.  If this changes, the
-# legacy path has drifted and existing demos may need re-recording. The
-# `missing_event=1` entry comes from the legacy
-# `inject_dangling_e2o_relationship_event` injector, which inserts an E2O
-# row referencing a fake event id — the new `detect_missing_event` picks
-# that up as well as the existing `dangling_e2o_relationship` detector.
-#
-# `dangling_e2o_relationship=2` reflects only the two rows the two legacy
-# injectors add (one missing_object side, one missing_event side). Earlier
-# snapshots of this test recorded much larger numbers (o2o=230, e2o=489)
-# because the detectors filtered on `event_type IS NULL / object_type IS
-# NULL`, which also flagged every relation touching the single object
-# that `inject_missing_object_type` NULL-types. That was a false-positive
-# double-count (the null-type object is already reported by
-# missing_object_type); the detectors now use existence sentinels.
-LEGACY_SNAPSHOT = {
-    "missing_object_type":              1,
-    "missing_attribute_value":          0,
-    "missing_event":                    1,
-    "missing_event_type":               0,
-    "missing_event_timestamp":          0,
-    "missing_object":                   0,
-    "duplicate_objects_on_ids":         1,
-    "duplicate_objects_on_attributes":  385,
-    "incorrect_attribute_datatype":     0,
-    "dangling_o2o_relationship":        0,
-    "dangling_e2o_relationship":        2,
+    "missing_object_type":               0,
+    "missing_attribute_value":           0,
+    "missing_event":                     0,
+    "missing_event_type":                0,
+    "missing_event_timestamp":           0,
+    "missing_event_attribute_value":     0,
+    "missing_object":                    0,
+    "duplicate_objects_on_ids":          0,
+    "duplicate_objects_on_attributes":   384,
+    "duplicate_events_on_ids":           0,
+    "duplicate_events_on_attributes":    0,
+    "incorrect_attribute_datatype":      0,
+    "incorrect_event_attribute_datatype": 0,
+    "dangling_o2o_relationship":         0,
+    "dangling_e2o_relationship":         0,
+    "duplicate_o2o_relations":           0,
+    "o2o_self_loop":                     0,
+    "duplicate_e2o_relations":           0,
 }
 
 
@@ -97,7 +79,7 @@ def clean_counts() -> dict[str, int]:
 def dirty_paths(tmp_path_factory) -> dict[str, str]:
     """Corrupt the clean DB once per level, share across tests."""
     out: dict[str, str] = {}
-    for level in ("legacy", "easy", "medium", "hard", "all"):
+    for level in ("easy", "medium", "hard", "all"):
         dst = tmp_path_factory.mktemp(level) / f"{level}.sqlite"
         out[level] = corrupt_database(DEFAULT_CLEAN_PATH, str(dst), level=level)
     return out
@@ -106,11 +88,6 @@ def dirty_paths(tmp_path_factory) -> dict[str, str]:
 def test_clean_baseline(clean_counts):
     """Guard the baseline so a change in the source DB is caught here."""
     assert clean_counts == CLEAN_BASELINE
-
-
-def test_legacy_matches_snapshot(dirty_paths):
-    """Pre-tier corruption sequence produces the same counts as before."""
-    assert _counts(dirty_paths["legacy"]) == LEGACY_SNAPSHOT
 
 
 @pytest.mark.parametrize("level", ["easy", "medium", "hard"])

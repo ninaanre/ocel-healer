@@ -82,7 +82,7 @@ class MissingObject(ResolutionTask):
            "rationale": "id prefix and qualifier both say 'orders'; matched price shape from peers",
            "confidence": 0.85}
 
-        violation = {ocel_object_id: 'products:MysteryGadget',
+        violation = {ocel_object_id: 'products:Echo Show 10',
                      inferred_type_from_prefix: 'products',
                      ocel_qualifier: 'product'}
         peer_columns = ['weight', 'price']

@@ -22,8 +22,7 @@ from src.corruption._common import (
 
 
 # ---------------------------------------------------------------------------
-# Base injectors — building blocks reused by the tiered flavors below and
-# called directly from the legacy stage.
+# Base injectors — building blocks reused by the tiered flavors below.
 # ---------------------------------------------------------------------------
 
 
@@ -41,50 +40,6 @@ def inject_duplicate_objects_on_ids(conn: sqlite3.Connection, ocel_id: str | Non
     if row is None:
         return None
     conn.execute("INSERT INTO object VALUES (?, ?)", row)
-    return row[0]
-
-
-def inject_duplicate_objects_on_attributes(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_attributes: Insert a new object whose per-type
-    attributes match an existing one but under a different ocel_id
-    (`{type}:CLONE_9999`)."""
-    types = conn.execute(
-        "SELECT DISTINCT ocel_type FROM object WHERE ocel_type IS NOT NULL AND ocel_type != ''"
-    ).fetchall()
-    for (ot,) in types:
-        table = f"object_{ot}"
-        try:
-            cols = [
-                desc[0]
-                for desc in conn.execute(f'SELECT * FROM "{table}" LIMIT 0').description
-            ]
-            row = conn.execute(f'SELECT * FROM "{table}" LIMIT 1').fetchone()
-            if row is None:
-                continue
-            new_id = f"{ot}:CLONE_9999"
-            conn.execute("INSERT INTO object VALUES (?, ?)", (new_id, ot))
-            placeholders = ", ".join(["?"] * len(cols))
-            conn.execute(f'INSERT INTO "{table}" VALUES ({placeholders})', (new_id, *row[1:]))
-            return new_id
-        except Exception:
-            continue
-    return None
-
-
-def inject_missing_object_type(conn: sqlite3.Connection, exclude_id: str | None = None) -> str | None:
-    """missing_object_type: Set ocel_type to NULL for one object
-    (different from exclude_id)."""
-    row = conn.execute(
-        "SELECT ocel_id FROM object WHERE ocel_type IS NOT NULL AND ocel_id != ? "
-        "GROUP BY ocel_id HAVING COUNT(*) = 1 LIMIT 1",
-        (exclude_id or "",),
-    ).fetchone()
-    if row is None:
-        return None
-    conn.execute(
-        "UPDATE object SET ocel_type = NULL WHERE ocel_id = ? AND ocel_type IS NOT NULL",
-        (row[0],),
-    )
     return row[0]
 
 
@@ -212,12 +167,13 @@ def inject_incorrect_attribute_datatype_string_in_order_price(conn: sqlite3.Conn
 
 
 def inject_incorrect_attribute_datatype_blob_in_role(conn: sqlite3.Connection) -> str | None:
-    """incorrect_attribute_datatype Hard: Put a `bytes` blob into
-    `object_Employees.role` (TEXT)."""
+    """incorrect_attribute_datatype Hard: Put UTF-16-LE bytes into
+    `object_Employees.role` (TEXT) — the shape you'd see if a legacy
+    system exported the role column without decoding it first."""
     n = conn.execute(
         'UPDATE object_Employees SET role = ? WHERE ocel_id = ? '
         'AND ocel_changed_field IS NULL',
-        (b"\x00\x00\x01", "Jan Niklas Adams"),
+        ("Sales".encode("utf-16-le"), "Jan Niklas Adams"),
     ).rowcount
     return "Jan Niklas Adams" if n > 0 else None
 
@@ -267,10 +223,12 @@ def inject_duplicate_objects_on_attributes_clone_product(conn: sqlite3.Connectio
 
 
 def inject_duplicate_objects_on_attributes_clone_employee(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_attributes Medium: Insert two employees with
-    identical fabricated attributes."""
-    original = "employees:CONSULT_A"
-    clone = "employees:CONSULT_B"
+    """duplicate_objects_on_attributes Medium: Insert an employee and a
+    same-name `(dup)` copy sharing an off-catalogue `Consulting` role —
+    the shape you'd see when a contractor was re-created as a second
+    master-data record instead of being merged with the first."""
+    original = "Ada Nowak"
+    clone = "Ada Nowak (dup)"
     fingerprint_time = "2023-04-03 01:00:00"
     role = "Consulting"
     conn.execute("INSERT INTO object VALUES (?, ?)", (original, "employees"))

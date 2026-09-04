@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
@@ -22,14 +23,27 @@ class ActionResult:
     """Task-side outcome of parsing the LLM payload.
 
     `kind` is one of:
-      "update"   -- proposed concrete value; all fields populated.
-      "delete"   -- remove duplicate rows keeping MIN(rowid).
-      "insert"   -- create one or more new rows (see `inserts`); used by
-                    tasks like `missing_object` that must add both a row to
-                    `object` and a matching initial-state row to `object_<Type>`.
-      "decline"  -- LLM said null; orchestrator attaches a routable target
-                    (via task.suppressed_target) so override still works.
-      "unrouted" -- no clean override target (e.g. duplicate_objects_on_ids).
+      "update"           -- proposed concrete value; all fields populated.
+      "delete"           -- remove duplicate rows keeping MIN(rowid). PK can
+                            be single-column (N6 "same ocel_id repeated") or
+                            multi-column (duplicate relation triples in
+                            object_object / event_object).
+      "delete_all"       -- delete every row matching the target_pk, no
+                            MIN(rowid) preservation. Used for structurally
+                            illegal rows (e.g. O2O self-loops) where no
+                            duplicate-of-me exists to keep.
+      "insert"           -- create one or more new rows (see `inserts`); used by
+                            tasks like `missing_object` that must add both a row
+                            to `object` and a matching initial-state row to
+                            `object_<Type>`.
+      "alter_add_column" -- add a NULL column to a per-type sub-table (schema
+                            change). `target_table`, `column` and `new_value`
+                            (holding a SQLite affinity token) are populated;
+                            existing rows keep NULL and are picked up by the
+                            downstream `missing_*_attribute_value` detectors.
+      "decline"          -- LLM said null; orchestrator attaches a routable target
+                            (via task.suppressed_target) so override still works.
+      "unrouted"         -- no clean override target (e.g. duplicate_objects_on_ids).
     """
     kind: str
     target_table: str = ""
@@ -48,13 +62,45 @@ class ActionResult:
 
     @classmethod
     def delete(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
-        """Delete duplicate rows keeping the one with MIN(rowid)."""
+        """Delete duplicate rows keeping the one with MIN(rowid).
+
+        ``target_pk`` may hold one column (dedupe by shared id) or several
+        (dedupe by composite triple, e.g. object_object rows sharing the
+        same (source, target, qualifier)). All matching rows except the
+        MIN(rowid) survivor are removed.
+        """
         return cls(kind="delete", target_table=target_table, target_pk=target_pk, reason=reason)
+
+    @classmethod
+    def delete_all(cls, *, target_table: str, target_pk: dict, reason: str = "") -> "ActionResult":
+        """Delete every row matching ``target_pk`` — no MIN(rowid) survivor.
+
+        Used for structurally illegal rows (e.g. O2O self-loops) where the
+        offending row simply shouldn't exist.
+        """
+        return cls(kind="delete_all", target_table=target_table, target_pk=target_pk, reason=reason)
 
     @classmethod
     def insert(cls, *, inserts: list[dict], reason: str = "") -> "ActionResult":
         """Insert one or more new rows. All inserts run in a single transaction."""
         return cls(kind="insert", reason=reason, inserts=list(inserts))
+
+    @classmethod
+    def alter_add_column(
+        cls, *, target_table: str, column: str, affinity: str = "TEXT", reason: str = "",
+    ) -> "ActionResult":
+        """Add a NULL column to a per-type sub-table.
+
+        `affinity` is a SQLite storage-class token (`TEXT`, `INTEGER`,
+        `REAL`, `BLOB`) — validated at apply time. `TEXT` is the safe
+        default when the LLM doesn't hint at a specific affinity."""
+        return cls(
+            kind="alter_add_column",
+            target_table=target_table,
+            column=column,
+            new_value=affinity,
+            reason=reason,
+        )
 
     @classmethod
     def decline(cls, reason: str) -> "ActionResult":
@@ -86,6 +132,46 @@ def object_attribute_target(row: dict) -> dict | None:
     }
 
 
+def event_attribute_target(row: dict, *, sqlite_path: str | None = None) -> dict | None:
+    """Target builder for repairing an event-attribute cell.
+
+    Mirrors :func:`object_attribute_target`. Per-type event tables are
+    named ``event_<ocel_type_map>`` where the ``ocel_type_map`` suffix
+    comes from ``event_map_type`` and may differ from the paper-label
+    ``event_type`` (e.g. type `"Create Order"` maps to
+    ``event_CreateOrder``). When ``sqlite_path`` is supplied, this
+    function resolves the map; otherwise it falls back to the raw event
+    type as the suffix and relies on ``apply_repair``'s tolerant table
+    resolver (see :func:`_resolve_table`) to case-match.
+    """
+    event_type = row.get("event_type")
+    attr_col = row.get("attribute_name") or row.get("attribute")
+    anchor_id = row.get("ocel_id") or row.get("ocel_event_id")
+    if not (event_type and attr_col and anchor_id):
+        return None
+    old = row["actual_value"] if "actual_value" in row else None
+    table = f"event_{event_type}"
+    if sqlite_path:
+        try:
+            with _connect(sqlite_path) as _conn:
+                row_map = _conn.execute(
+                    "SELECT ocel_type_map FROM event_map_type WHERE ocel_type = ? LIMIT 1",
+                    (event_type,),
+                ).fetchone()
+                if row_map and row_map[0]:
+                    table = f"event_{row_map[0]}"
+        except sqlite3.Error:
+            # Fall through to the raw suffix — apply_repair's resolver may
+            # still case-match it against the schema.
+            pass
+    return {
+        "target_table": table,
+        "target_pk": {"ocel_id": anchor_id},
+        "column": attr_col,
+        "old_value": old,
+    }
+
+
 def relation_swap_target(row: dict, *, table: str, sides: dict[str, dict]) -> dict | None:
     """`sides` maps each missing_side value to {"column": <write>, "pk": [...]}."""
     spec = sides.get(row.get("missing_side"))
@@ -106,7 +192,7 @@ def relation_swap_target(row: dict, *, table: str, sides: dict[str, dict]) -> di
 _PROPOSED_KEYS = (
     "coerced_value", "inferred_value", "inferred_type",
     "inferred_referent", "canonical_id", "canonical_value",
-    "inferred_timestamp", "ocel_type",
+    "inferred_timestamp", "ocel_type", "suggested_value",
 )
 
 _EMPTY_TARGET = {"target_table": "", "target_pk": {}, "column": None, "old_value": None}
@@ -184,6 +270,15 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
             confidence=confidence, issue_key=issue_key, proposed_value=None,
         )
 
+    if result.kind == "delete_all":
+        return _action(
+            "delete_all",
+            target={"target_table": result.target_table, "target_pk": result.target_pk,
+                    "column": None, "old_value": None},
+            new_value=None, rationale=result.reason or rationale,
+            confidence=confidence, issue_key=issue_key, proposed_value=None,
+        )
+
     if result.kind == "insert":
         # target_table for display only; the real payload lives under "inserts".
         display_table = result.inserts[0]["table"] if result.inserts else ""
@@ -196,6 +291,20 @@ def from_task_result(task, row: dict, payload: dict) -> dict:
         )
         action["inserts"] = result.inserts
         return action
+
+    if result.kind == "alter_add_column":
+        # No target_pk (schema change, not a row update). `column` carries the
+        # new attribute name and `new_value` carries the SQLite affinity token
+        # (TEXT/INTEGER/REAL/BLOB). apply_repair validates both against a
+        # per-type sub-table whitelist.
+        return _action(
+            "alter_add_column",
+            target={"target_table": result.target_table, "target_pk": {},
+                    "column": result.column, "old_value": None},
+            new_value=result.new_value, rationale=result.reason or rationale,
+            confidence=confidence, issue_key=issue_key,
+            proposed_value=result.column,
+        )
 
     if result.kind == "decline":
         return _action(
@@ -363,6 +472,56 @@ def _validate_insert(conn: sqlite3.Connection, entry: dict) -> tuple[str, dict[s
     return table, coerced
 
 
+# Column names we're willing to ADD via ALTER TABLE. Deliberately strict:
+# lowercase-friendly, starts with a letter, no reserved OCEL2 prefixes.
+_SAFE_COLUMN_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_RESERVED_COLUMN_PREFIXES = ("ocel_",)
+_ALLOWED_AFFINITIES = {"TEXT", "INTEGER", "REAL", "BLOB"}
+
+
+def _validate_alter_add_column(conn: sqlite3.Connection, action: dict) -> tuple[str, str, str]:
+    """Whitelist an `alter_add_column` action against the live schema.
+
+    Returns (resolved_table, column, affinity). Enforces:
+      - target_table is a per-type sub-table (`object_<Type>` or
+        `event_<Type>`). Top-level `object`, `event`, `event_object`,
+        `object_object` are rejected to keep the OCEL2 spine intact.
+      - column is a safe SQLite identifier and does not already exist on
+        the table (idempotency guard).
+      - column does not shadow a reserved `ocel_*` name.
+      - affinity is one of the four SQLite storage classes.
+    """
+    table = _resolve_table(conn, action["target_table"])
+    per_type = (
+        {t for _, t in _object_type_tables(conn)}
+        | {t for _, t in _event_type_tables(conn)}
+    )
+    if table not in per_type:
+        raise ValueError(
+            f"Refusing to alter: {table!r} is not a per-type sub-table."
+        )
+    column = action.get("column") or ""
+    if not _SAFE_COLUMN_NAME.match(column):
+        raise ValueError(f"Refusing to alter: unsafe column name {column!r}.")
+    if column.lower().startswith(_RESERVED_COLUMN_PREFIXES):
+        raise ValueError(
+            f"Refusing to alter: column name {column!r} shadows a reserved "
+            f"OCEL2 prefix."
+        )
+    existing = {name for _, name, *_ in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    if column in existing:
+        raise ValueError(
+            f"Refusing to alter: column {column!r} already exists on {table!r}."
+        )
+    affinity = str(action.get("new_value") or "TEXT").upper()
+    if affinity not in _ALLOWED_AFFINITIES:
+        raise ValueError(
+            f"Refusing to alter: affinity {affinity!r} is not one of "
+            f"{sorted(_ALLOWED_AFFINITIES)}."
+        )
+    return table, column, affinity
+
+
 def apply_repair(
     sqlite_path: str,
     action: dict,
@@ -390,10 +549,29 @@ def apply_repair(
     elif action["kind"] == "insert":
         if has_override:
             raise ValueError("override not supported for insert actions")
+    elif action["kind"] == "alter_add_column":
+        if has_override:
+            raise ValueError("override not supported for alter_add_column actions")
+    elif action["kind"] == "delete_all":
+        if has_override:
+            raise ValueError("override not supported for delete_all actions")
     elif action["kind"] not in ("update", "delete"):
         raise NotImplementedError(f"action kind {action['kind']!r} not supported.")
 
     with _connect(sqlite_path) as conn:
+        if action["kind"] == "alter_add_column":
+            table, column, affinity = _validate_alter_add_column(conn, action)
+            sql = f'ALTER TABLE {quote(table)} ADD COLUMN {quote(column)} {affinity}'
+            rendered = sql
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            with conn:
+                conn.execute(sql)
+            return (
+                f"Committed: added column {column!r} ({affinity}) to {table!r}.\n"
+                f"{rendered}"
+            )
+
         if action["kind"] == "insert":
             entries = action.get("inserts") or []
             if not entries:
@@ -427,20 +605,35 @@ def apply_repair(
 
         if action["kind"] == "delete":
             pk_items = list(action["target_pk"].items())
-            if len(pk_items) != 1:
-                raise ValueError("delete action requires exactly one primary key column")
-            pk_col, pk_val = pk_items[0]
+            if not pk_items:
+                raise ValueError("delete action requires at least one primary key column")
+            where = " AND ".join(f"{quote(c)} = ?" for c, _ in pk_items)
+            pk_vals = tuple(v for _, v in pk_items)
             sql = (
-                f"DELETE FROM {quote(table)} WHERE {quote(pk_col)} = ? "
-                f"AND rowid NOT IN (SELECT MIN(rowid) FROM {quote(table)} WHERE {quote(pk_col)} = ?)"
+                f"DELETE FROM {quote(table)} WHERE {where} "
+                f"AND rowid NOT IN (SELECT MIN(rowid) FROM {quote(table)} WHERE {where})"
             )
-            params = (pk_val, pk_val)
+            params = pk_vals + pk_vals
             rendered = f"{sql}\n  with params = {params!r}"
             if dry_run:
                 return f"-- DRY RUN (no changes written)\n{rendered}"
             with conn:
                 n = conn.execute(sql, params).rowcount
             return f"Committed: {n} duplicate row(s) deleted.\n{rendered}"
+
+        if action["kind"] == "delete_all":
+            pk_items = list(action["target_pk"].items())
+            if not pk_items:
+                raise ValueError("delete_all action requires at least one primary key column")
+            where = " AND ".join(f"{quote(c)} = ?" for c, _ in pk_items)
+            params = tuple(v for _, v in pk_items)
+            sql = f"DELETE FROM {quote(table)} WHERE {where}"
+            rendered = f"{sql}\n  with params = {params!r}"
+            if dry_run:
+                return f"-- DRY RUN (no changes written)\n{rendered}"
+            with conn:
+                n = conn.execute(sql, params).rowcount
+            return f"Committed: {n} row(s) deleted.\n{rendered}"
 
         if has_override:
             new_value = _coerce_for_affinity(override_value, _column_affinity(conn, table, col))
