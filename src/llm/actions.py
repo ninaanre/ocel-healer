@@ -150,7 +150,7 @@ def event_attribute_target(row: dict, *, sqlite_path: str | None = None) -> dict
     if not (event_type and attr_col and anchor_id):
         return None
     old = row["actual_value"] if "actual_value" in row else None
-    table = f"event_{event_type}"
+    table = f"event_{event_type.replace(' ', '')}"
     if sqlite_path:
         try:
             with _connect(sqlite_path) as _conn:

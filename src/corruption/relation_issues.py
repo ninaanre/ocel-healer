@@ -12,6 +12,7 @@ import sqlite3
 
 from .p2p_mappings import (
     get_p2p_object_type,
+    get_p2p_event_type,
     get_p2p_e2o_qualifier,
     get_p2p_o2o_qualifier,
 )
@@ -166,62 +167,73 @@ def inject_dangling_o2o_relationship_missing_both_typo(conn: sqlite3.Connection)
 # ---------------------------------------------------------------------------
 
 
-def inject_missing_object_order_easy(conn: sqlite3.Connection) -> str | None:
-    """missing_object Easy: E2O row references purchase_order:po-991000
-    (id doesn't exist).
+def inject_missing_object_order_easy(conn: sqlite3.Connection) -> dict | None:
+    """missing_object Easy: delete a real purchase_order object that is still
+    referenced by a 'place order' E2O row, leaving that row dangling.
 
-    Easy because the type prefix immediately pins the type and the
-    peer set for the LLM to imitate is large.
+    Easy because the type is unambiguous from the surviving E2O qualifier,
+    and the peer set for the LLM to imitate is large.
     """
     place_type = get_p2p_event_type("place order")
     order_qual = get_p2p_e2o_qualifier("order")
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (place_type,)).fetchone()
-    if ev is None:
+    row = conn.execute(
+        "SELECT o.ocel_id, o.ocel_type FROM object o "
+        "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
+        "JOIN event e ON e.ocel_id = eo.ocel_event_id "
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (place_type, order_qual),
+    ).fetchone()
+    if row is None:
         return None
-    missing_id = "purchase_order:po-991000"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, order_qual),
-    )
-    return missing_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM object WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
-def inject_missing_object_item_medium(conn: sqlite3.Connection) -> str | None:
-    """missing_object Medium: E2O row references material:mat-881000
-    (id doesn't exist).
+def inject_missing_object_item_medium(conn: sqlite3.Connection) -> dict | None:
+    """missing_object Medium: delete a real material object that is still
+    referenced by a 'pick item' E2O row, leaving that row dangling.
 
     Medium because materials are used in multiple contexts.
     """
     pick_type = get_p2p_event_type("pick item")
     item_qual = get_p2p_e2o_qualifier("item")
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (pick_type,)).fetchone()
-    if ev is None:
+    row = conn.execute(
+        "SELECT o.ocel_id, o.ocel_type FROM object o "
+        "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
+        "JOIN event e ON e.ocel_id = eo.ocel_event_id "
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (pick_type, item_qual),
+    ).fetchone()
+    if row is None:
         return None
-    missing_id = "material:mat-881000"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, item_qual),
-    )
-    return missing_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM object WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
-def inject_missing_object_product_hard(conn: sqlite3.Connection) -> str | None:
-    """missing_object Hard: E2O row references material with plausible name
-    but doesn't exist.
+def inject_missing_object_product_hard(conn: sqlite3.Connection) -> dict | None:
+    """missing_object Hard: delete a real material object referenced with
+    qualifier 'product' from a 'place order' E2O row, leaving that row
+    dangling.
 
-    Hard because material ids may not use type prefix consistently.
+    Hard because material ids may not use type prefix consistently, so the
+    LLM can't lean on id shape the way it could for the easy/medium cases.
     """
     place_type = get_p2p_event_type("place order")
     product_qual = get_p2p_e2o_qualifier("product")
-    ev = conn.execute("SELECT ocel_id FROM event WHERE ocel_type=? LIMIT 1", (place_type,)).fetchone()
-    if ev is None:
+    row = conn.execute(
+        "SELECT o.ocel_id, o.ocel_type FROM object o "
+        "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
+        "JOIN event e ON e.ocel_id = eo.ocel_event_id "
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (place_type, product_qual),
+    ).fetchone()
+    if row is None:
         return None
-    missing_id = "material:MISSING_PRODUCT_XYZ"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (ev[0], missing_id, product_qual),
-    )
-    return missing_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM object WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
 # ---------------------------------------------------------------------------

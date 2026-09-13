@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from src.corruption._common import _capture_and_update
 from .p2p_mappings import (
     get_p2p_event_table,
     get_p2p_event_type,
@@ -29,7 +30,7 @@ from .p2p_mappings import (
 # ---------------------------------------------------------------------------
 
 
-def inject_missing_event_timestamp_null_place_order_easy(conn: sqlite3.Connection) -> str | None:
+def inject_missing_event_timestamp_null_place_order_easy(conn: sqlite3.Connection) -> dict | None:
     """missing_event_timestamp Easy: NULL the ocel_time on one `event_PlaceOrder` row.
 
     Easy because `place order` is the first event in the lifecycle, so its
@@ -40,11 +41,12 @@ def inject_missing_event_timestamp_null_place_order_easy(conn: sqlite3.Connectio
     row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
     if row is None:
         return None
-    conn.execute(f"UPDATE {table} SET ocel_time = NULL WHERE ocel_id = ?", row)
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, None)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_missing_event_timestamp_empty_pick_item_medium(conn: sqlite3.Connection) -> str | None:
+def inject_missing_event_timestamp_empty_pick_item_medium(conn: sqlite3.Connection) -> dict | None:
     """missing_event_timestamp Medium: Empty-string ocel_time on one `event_PickItem` row.
 
     Medium because empty-string trips the detector but a naive `IS NULL`
@@ -55,11 +57,12 @@ def inject_missing_event_timestamp_empty_pick_item_medium(conn: sqlite3.Connecti
     row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
     if row is None:
         return None
-    conn.execute(f"UPDATE {table} SET ocel_time = '' WHERE ocel_id = ?", row)
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, "")
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Connection) -> str | None:
+def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Connection) -> dict | None:
     """missing_event_timestamp Hard: NULL the ocel_time on one `event_ItemOutOfStock` row.
 
     Hard because `item out of stock` is a rare, off-happy-path event with
@@ -70,8 +73,9 @@ def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Con
     row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
     if row is None:
         return None
-    conn.execute(f"UPDATE {table} SET ocel_time = NULL WHERE ocel_id = ?", row)
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, None)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
 # ---------------------------------------------------------------------------
@@ -81,75 +85,74 @@ def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Con
 # ---------------------------------------------------------------------------
 
 
-def inject_missing_event_place_order_easy(conn: sqlite3.Connection) -> str | None:
-    """Missing event, Easy: E2O row references `place_order:e-991000` (no
-    corresponding row in `event`).
+def inject_missing_event_place_order_easy(conn: sqlite3.Connection) -> dict | None:
+    """Missing event, Easy: delete a real 'place order' event that is still
+    referenced by its E2O row (qualifier `order`), leaving that row dangling.
 
-    Easy because the fake id embeds the activity keyword (`place_order:…`),
-    so the resolver has a clear signal for what event type + sub-table to
-    insert into. The E2O row is linked to a real order object so the
-    lifecycle context is intact.
+    Easy because `place order` is the first event in the lifecycle, so the
+    linked order object is still intact, and the surviving E2O qualifier
+    gives a clear signal for what event type belongs there.
     """
-    obj_type = get_p2p_object_type("orders")
-    qualifier = get_p2p_e2o_qualifier("order")
-    obj = conn.execute(
-        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    place_type = get_p2p_event_type("place order")
+    order_qual = get_p2p_e2o_qualifier("order")
+    row = conn.execute(
+        "SELECT e.ocel_id, e.ocel_type FROM event e "
+        "JOIN event_object eo ON eo.ocel_event_id = e.ocel_id "
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (place_type, order_qual),
     ).fetchone()
-    if obj is None:
+    if row is None:
         return None
-    missing_event_id = "place_order:e-991000"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (missing_event_id, obj[0], qualifier),
-    )
-    return missing_event_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM event WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
-def inject_missing_event_pick_item_medium(conn: sqlite3.Connection) -> str | None:
-    """Missing event, Medium: E2O row references `pick_item:e-881000`.
+def inject_missing_event_pick_item_medium(conn: sqlite3.Connection) -> dict | None:
+    """Missing event, Medium: delete a real 'pick item' event that is still
+    referenced by its E2O row (qualifier `item`), leaving that row dangling.
 
-    Medium because `pick item` is mid-lifecycle — the resolver must
+    Medium because `pick item` sits mid-lifecycle — the resolver must
     interpolate a plausible timestamp from bracketing neighbors, not just
-    read it off a single anchor. The fake id still embeds the activity
-    keyword, so the event type is unambiguous.
+    read it off a single anchor.
     """
-    obj_type = get_p2p_object_type("items")
-    qualifier = get_p2p_e2o_qualifier("item")
-    obj = conn.execute(
-        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    pick_type = get_p2p_event_type("pick item")
+    item_qual = get_p2p_e2o_qualifier("item")
+    row = conn.execute(
+        "SELECT e.ocel_id, e.ocel_type FROM event e "
+        "JOIN event_object eo ON eo.ocel_event_id = e.ocel_id "
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (pick_type, item_qual),
     ).fetchone()
-    if obj is None:
+    if row is None:
         return None
-    missing_event_id = "pick_item:e-881000"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (missing_event_id, obj[0], qualifier),
-    )
-    return missing_event_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM event WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
-def inject_missing_event_bare_id_hard(conn: sqlite3.Connection) -> str | None:
-    """Missing event, Hard: E2O row references `e-771000` — a bare id with
-    no `<type>:` prefix.
+def inject_missing_event_bare_id_hard(conn: sqlite3.Connection) -> dict | None:
+    """Missing event, Hard: delete a real event still referenced by an E2O
+    row with qualifier `packer`, leaving that row dangling.
 
-    Hard because the fake id carries no activity hint. The resolver must
-    infer the event type purely from the qualifier and the object type of
-    the linked object (here, a `package`, with qualifier `packer` — a
-    strong hint at `create package` or `send package`).
+    Hard because the surviving E2O row carries no `<type>:` id hint once the
+    event is gone — the resolver must infer the event type purely from the
+    qualifier and the linked object's type (here, a `package`).
     """
     obj_type = get_p2p_object_type("packages")
     qualifier = get_p2p_e2o_qualifier("packer")
-    obj = conn.execute(
-        "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
+    row = conn.execute(
+        "SELECT e.ocel_id, e.ocel_type FROM event e "
+        "JOIN event_object eo ON eo.ocel_event_id = e.ocel_id "
+        "JOIN object o ON o.ocel_id = eo.ocel_object_id "
+        "WHERE o.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        (obj_type, qualifier),
     ).fetchone()
-    if obj is None:
+    if row is None:
         return None
-    missing_event_id = "e-771000"
-    conn.execute(
-        "INSERT INTO event_object VALUES (?, ?, ?)",
-        (missing_event_id, obj[0], qualifier),
-    )
-    return missing_event_id
+    ocel_id, ocel_type = row
+    conn.execute("DELETE FROM event WHERE ocel_id = ?", (ocel_id,))
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: ocel_type}}
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +222,7 @@ def inject_missing_event_type_whitespace_package_hard(conn: sqlite3.Connection) 
 # ---------------------------------------------------------------------------
 
 
-def inject_missing_event_attribute_value_null_order_id_easy(conn: sqlite3.Connection) -> str | None:
+def inject_missing_event_attribute_value_null_order_id_easy(conn: sqlite3.Connection) -> dict | None:
     """missing_event_attribute_value Easy: NULL lifecycle attribute in event_PlaceOrder.
 
     Easy because PlaceOrder is common and lifecycle is a standard attribute.
@@ -233,14 +236,12 @@ def inject_missing_event_attribute_value_null_order_id_easy(conn: sqlite3.Connec
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET lifecycle = NULL WHERE ocel_id = ?",
-        row,
-    )
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "lifecycle", ocel_id, None)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connection) -> str | None:
+def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connection) -> dict | None:
     """missing_event_attribute_value Hard: NULL resource attribute in event_ItemOutOfStock.
 
     Hard because ItemOutOfStock is rare and resource is a less obvious required field.
@@ -254,11 +255,9 @@ def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connecti
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET resource = NULL WHERE ocel_id = ?",
-        row,
-    )
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "resource", ocel_id, None)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +265,7 @@ def inject_missing_event_attribute_value_null_reason_hard(conn: sqlite3.Connecti
 # ---------------------------------------------------------------------------
 
 
-def inject_incorrect_event_attribute_datatype_string_in_quantity_easy(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_attribute_datatype_string_in_quantity_easy(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_attribute_datatype Easy: Put integer in resource text field.
 
     Note: Adapted for P2P - uses resource (text field) instead of quantity (numeric).
@@ -278,14 +277,12 @@ def inject_incorrect_event_attribute_datatype_string_in_quantity_easy(conn: sqli
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET resource = 12345 WHERE ocel_id = ?",
-        row,
-    )
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "resource", ocel_id, 12345)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_attribute_datatype Hard: Put UTF-16-LE bytes in lifecycle text field.
 
     Note: Adapted for P2P - uses lifecycle instead of order_id.
@@ -296,12 +293,12 @@ def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite
     ).fetchone()
     if row is None:
         return None
+    ocel_id = row[0]
     # Put bytes in lifecycle field
-    conn.execute(
-        f"UPDATE {table} SET lifecycle = ? WHERE ocel_id = ?",
-        ("complete".encode("utf-16-le"), row[0]),
+    old_value = _capture_and_update(
+        conn, table, "lifecycle", ocel_id, "complete".encode("utf-16-le")
     )
-    return row[0]
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +306,7 @@ def inject_incorrect_event_attribute_datatype_blob_in_activity_hard(conn: sqlite
 # ---------------------------------------------------------------------------
 
 
-def inject_incorrect_event_attribute_value_negative_quantity_easy(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_attribute_value_negative_quantity_easy(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_attribute_value Easy: Invalid lifecycle value in PickItem.
 
     Note: Adapted for P2P - uses lifecycle with invalid value instead of negative quantity.
@@ -320,15 +317,18 @@ def inject_incorrect_event_attribute_value_negative_quantity_easy(conn: sqlite3.
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET lifecycle = 'invalid_state' WHERE ocel_id = ?",
-        row,
-    )
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, table, "lifecycle", ocel_id, "invalid_state")
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Connection) -> str | None:
-    """incorrect_event_attribute_value Hard: ConfirmOrder before PlaceOrder (temporal violation)."""
+def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Connection) -> dict | None:
+    """incorrect_event_attribute_value Hard: ConfirmOrder before PlaceOrder (temporal violation).
+
+    Swaps the two events' ocel_time values, so both ids get an
+    original_values entry -- the correct repair swaps them back, not just
+    for the reported affected id but for its PlaceOrder counterpart too.
+    """
     # Find a PlaceOrder and its corresponding ConfirmOrder
     place_table = get_p2p_event_table("event_PlaceOrder")
     confirm_table = get_p2p_event_table("event_ConfirmOrder")
@@ -354,7 +354,10 @@ def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Con
         f"UPDATE {place_table} SET ocel_time = ? WHERE ocel_id = ?",
         (confirm_time, place_id),
     )
-    return confirm_id
+    return {
+        "affected_ids": [confirm_id, place_id],
+        "original_values": {confirm_id: confirm_time, place_id: place_time},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +365,7 @@ def inject_incorrect_event_attribute_value_time_violation_hard(conn: sqlite3.Con
 # ---------------------------------------------------------------------------
 
 
-def inject_incorrect_event_type_swap_easy(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_type_swap_easy(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_type Easy: Change PlaceOrder type to PickItem (completely wrong)."""
     place_type = get_p2p_event_type("place order")
     pick_type = get_p2p_event_type("pick item")
@@ -371,11 +374,12 @@ def inject_incorrect_event_type_swap_easy(conn: sqlite3.Connection) -> str | Non
     ).fetchone()
     if row is None:
         return None
-    conn.execute("UPDATE event SET ocel_type = ? WHERE ocel_id = ?", (pick_type, row[0]))
-    return row[0]
+    ocel_id = row[0]
+    old_value = _capture_and_update(conn, "event", "ocel_type", ocel_id, pick_type)
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_type Hard: Change PlaceOrder to placeorder (case variant)."""
     place_type = get_p2p_event_type("place order")
     row = conn.execute(
@@ -383,9 +387,12 @@ def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> s
     ).fetchone()
     if row is None:
         return None
+    ocel_id = row[0]
     # Create case variant - lowercase version
-    conn.execute("UPDATE event SET ocel_type = 'create purchase order' WHERE ocel_id = ?", row)
-    return row[0]
+    old_value = _capture_and_update(
+        conn, "event", "ocel_type", ocel_id, "create purchase order"
+    )
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +400,7 @@ def inject_incorrect_event_type_case_variant_hard(conn: sqlite3.Connection) -> s
 # ---------------------------------------------------------------------------
 
 
-def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_time Easy: Set event time to year 2099."""
     table = get_p2p_event_table("event_PlaceOrder")
     row = conn.execute(
@@ -401,14 +408,14 @@ def inject_incorrect_event_time_future_easy(conn: sqlite3.Connection) -> str | N
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET ocel_time = '2099-01-01 00:00:00' WHERE ocel_id = ?",
-        row,
+    ocel_id = row[0]
+    old_value = _capture_and_update(
+        conn, table, "ocel_time", ocel_id, "2099-01-01 00:00:00"
     )
-    return row[0]
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
-def inject_incorrect_event_time_past_hard(conn: sqlite3.Connection) -> str | None:
+def inject_incorrect_event_time_past_hard(conn: sqlite3.Connection) -> dict | None:
     """incorrect_event_time Hard: Set event time to year 1900."""
     table = get_p2p_event_table("event_ConfirmOrder")
     row = conn.execute(
@@ -416,11 +423,11 @@ def inject_incorrect_event_time_past_hard(conn: sqlite3.Connection) -> str | Non
     ).fetchone()
     if row is None:
         return None
-    conn.execute(
-        f"UPDATE {table} SET ocel_time = '1900-01-01 00:00:00' WHERE ocel_id = ?",
-        row,
+    ocel_id = row[0]
+    old_value = _capture_and_update(
+        conn, table, "ocel_time", ocel_id, "1900-01-01 00:00:00"
     )
-    return row[0]
+    return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
 # ---------------------------------------------------------------------------

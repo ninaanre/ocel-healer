@@ -58,7 +58,7 @@ def _post_chat(
         "model": model or _active_model,
         "messages": messages,
         "response_format": {"type": "json_object"},
-        "temperature": 0.0,
+        "temperature": 0.5,
         "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(
