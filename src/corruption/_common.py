@@ -13,13 +13,10 @@ from pathlib import Path
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 DEFAULT_CLEAN_PATH = str(_DATA_DIR / "order-management-clean.sqlite")
-DEFAULT_DIRTY_PATH = str(_DATA_DIR / "order-management.sqlite")        # legacy output
 DEFAULT_FULL_PATH = str(_DATA_DIR / "order-management-full.sqlite")     # level='all' output
 
 
 def _default_dst_for_level(level: str) -> str:
-    if level == "legacy":
-        return DEFAULT_DIRTY_PATH
     if level == "all":
         return DEFAULT_FULL_PATH
     return str(_DATA_DIR / f"order-management-{level}.sqlite")
@@ -40,6 +37,74 @@ def _remove_object_primary_key(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE object_tmp RENAME TO object")
 
 
+def _remove_event_primary_key(conn: sqlite3.Connection) -> None:
+    """Recreate the event table without PRIMARY KEY so duplicate ocel_id rows
+    can be inserted (needed by duplicate_events_on_ids). Idempotent: no-op if
+    the PK is already absent."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='event'"
+    ).fetchone()
+    if row is None or "PRIMARY KEY" not in (row[0] or "").upper():
+        return
+    conn.execute("CREATE TABLE event_tmp (ocel_id TEXT, ocel_type TEXT)")
+    conn.execute("INSERT INTO event_tmp SELECT ocel_id, ocel_type FROM event")
+    conn.execute("DROP TABLE event")
+    conn.execute("ALTER TABLE event_tmp RENAME TO event")
+
+
+def _remove_event_object_primary_key(conn: sqlite3.Connection) -> None:
+    """Recreate event_object without its composite PRIMARY KEY
+    (event_id, object_id, qualifier) so duplicate triples can be inserted
+    (needed by duplicate_e2o_relations). Idempotent."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='event_object'"
+    ).fetchone()
+    if row is None or "PRIMARY KEY" not in (row[0] or "").upper():
+        return
+    conn.execute(
+        "CREATE TABLE event_object_tmp "
+        "(ocel_event_id TEXT, ocel_object_id TEXT, ocel_qualifier TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO event_object_tmp "
+        "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object"
+    )
+    conn.execute("DROP TABLE event_object")
+    conn.execute("ALTER TABLE event_object_tmp RENAME TO event_object")
+
+
+def _remove_object_object_primary_key(conn: sqlite3.Connection) -> None:
+    """Recreate object_object without its composite PRIMARY KEY
+    (source_id, target_id, qualifier) so duplicate triples can be inserted
+    (needed by duplicate_o2o_relations). Idempotent."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='object_object'"
+    ).fetchone()
+    if row is None or "PRIMARY KEY" not in (row[0] or "").upper():
+        return
+    conn.execute(
+        "CREATE TABLE object_object_tmp "
+        "(ocel_source_id TEXT, ocel_target_id TEXT, ocel_qualifier TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO object_object_tmp "
+        "SELECT ocel_source_id, ocel_target_id, ocel_qualifier FROM object_object"
+    )
+    conn.execute("DROP TABLE object_object")
+    conn.execute("ALTER TABLE object_object_tmp RENAME TO object_object")
+
+
+def _remove_all_primary_keys(conn: sqlite3.Connection) -> None:
+    """Relax PK constraints on all four OCEL2 spine tables (object, event,
+    event_object, object_object) so every issue type -- including the
+    duplicate_* flavors on ids and on relations -- can be injected via a
+    plain INSERT. Idempotent; safe to call multiple times per connection."""
+    _remove_object_primary_key(conn)
+    _remove_event_primary_key(conn)
+    _remove_event_object_primary_key(conn)
+    _remove_object_object_primary_key(conn)
+
+
 def _null_type_for(
     conn: sqlite3.Connection, ocel_id: str, *, set_to: str | None
 ) -> str | None:
@@ -51,6 +116,33 @@ def _null_type_for(
     return ocel_id if n > 0 else None
 
 
+def _capture_and_update(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    ocel_id: str,
+    new_value: object,
+    *,
+    id_col: str = "ocel_id",
+) -> object:
+    """Read `column`'s current value for `ocel_id` in `table`, overwrite it
+    with `new_value`, and return the value that was there before.
+
+    Centralizes the "capture pre-corruption value, then corrupt" pattern so
+    injectors can report `original_values` in their return dict instead of
+    just the affected id.
+    """
+    row = conn.execute(
+        f'SELECT "{column}" FROM "{table}" WHERE {id_col} = ?', (ocel_id,)
+    ).fetchone()
+    old_value = row[0] if row else None
+    conn.execute(
+        f'UPDATE "{table}" SET "{column}" = ? WHERE {id_col} = ?',
+        (new_value, ocel_id),
+    )
+    return old_value
+
+
 def _clone_object_row(
     conn: sqlite3.Connection,
     *,
@@ -59,9 +151,17 @@ def _clone_object_row(
     ocel_type: str,
     table: str,
 ) -> str | None:
+    # Check if ocel_changed_field column exists
+    has_changed_field = conn.execute(
+        f"SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'ocel_changed_field'",
+    ).fetchone()[0]
+    where_clause = (
+        "WHERE ocel_id = ? AND ocel_changed_field IS NULL"
+        if has_changed_field
+        else "WHERE ocel_id = ?"
+    )
     row = conn.execute(
-        f'SELECT * FROM "{table}" WHERE ocel_id = ? AND ocel_changed_field IS NULL '
-        "LIMIT 1",
+        f'SELECT * FROM "{table}" {where_clause} LIMIT 1',
         (source_id,),
     ).fetchone()
     if row is None:

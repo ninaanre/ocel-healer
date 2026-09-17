@@ -49,6 +49,20 @@ class CoercedValueOutput(TaskOutput):
     coerced_value: Any = None
 
 
+class ImplausibleValueOutput(TaskOutput):
+    """incorrect_attribute_value (LLM detection task).
+
+    The value passed the rule-based datatype check but may be semantically
+    implausible for its attribute (e.g. negative price, out-of-vocab enum,
+    impossible date). `suggested_value` is null when the value looks
+    plausible — the row is not flagged. When non-null it must differ from
+    the current value; the same suggested value flags the row and doubles
+    as the coercion target for the fix path.
+    """
+
+    suggested_value: Any = None
+
+
 class InferredValueOutput(TaskOutput):
     """missing_attribute_value.
 
@@ -121,14 +135,45 @@ class InferredObjectOutput(TaskOutput):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
+class SuggestedAttribute(BaseModel):
+    """One suggested attribute in a `SuggestedAttributesOutput`."""
+
+    name: str
+    rationale: str = ""
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    # Optional SQLite affinity hint the model may return so the fix path
+    # can pick a column type when ALTERing the sub-table. Free-form to
+    # keep the model prompt small; validated downstream against the four
+    # SQLite storage classes (TEXT/INTEGER/REAL/BLOB) with TEXT as the
+    # fallback.
+    affinity: str | None = None
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class SuggestedAttributesOutput(TaskOutput):
+    """missing_object_attribute + missing_event_attribute (LLM detection).
+
+    The model receives one type (with its currently-declared attributes
+    and peer-type summaries) and proposes attributes the schema is
+    missing. An empty list means "no suggestions" — the sweep records
+    zero flags for this type.
+    """
+
+    suggested_attributes: list[SuggestedAttribute] = Field(default_factory=list)
+
+
 __all__ = [
     "TaskOutput",
     "InferredTypeOutput",
     "CoercedValueOutput",
+    "ImplausibleValueOutput",
     "InferredValueOutput",
     "InferredReferentOutput",
     "CanonicalValueOutput",
     "DuplicateResolutionOutput",
     "InferredTimestampOutput",
     "InferredObjectOutput",
+    "SuggestedAttribute",
+    "SuggestedAttributesOutput",
 ]

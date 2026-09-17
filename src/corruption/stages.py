@@ -15,7 +15,6 @@ from typing import Callable
 
 from src.corruption._common import (
     DEFAULT_CLEAN_PATH,
-    DEFAULT_DIRTY_PATH,
     DEFAULT_FULL_PATH,
     _default_dst_for_level,
     _remove_object_primary_key,
@@ -32,11 +31,9 @@ from src.corruption.event_issues import (
     inject_missing_event_type_whitespace_package_hard,
 )
 from src.corruption.object_issues import (
-    inject_duplicate_objects_on_attributes,
     inject_duplicate_objects_on_attributes_clone_employee,
     inject_duplicate_objects_on_attributes_clone_order_and_referenced,
     inject_duplicate_objects_on_attributes_clone_product,
-    inject_duplicate_objects_on_ids,
     inject_duplicate_objects_on_ids_conflicting_types,
     inject_duplicate_objects_on_ids_product,
     inject_duplicate_objects_on_ids_triple_null_type,
@@ -49,23 +46,29 @@ from src.corruption.object_issues import (
     inject_missing_attribute_value_empty_string_role,
     inject_missing_attribute_value_null_order_price,
     inject_missing_attribute_value_null_product_weight,
-    inject_missing_object_type,
     inject_missing_object_type_empty_string_order,
     inject_missing_object_type_null_employee,
     inject_missing_object_type_whitespace_product,
 )
 from src.corruption.relation_issues import (
-    inject_dangling_e2o_relationship_event,
     inject_dangling_e2o_relationship_missing_both,
     inject_dangling_e2o_relationship_missing_event,
     inject_dangling_e2o_relationship_missing_object_easy,
-    inject_dangling_e2o_relationship_object,
     inject_dangling_o2o_relationship_missing_both_typo,
     inject_dangling_o2o_relationship_missing_source,
     inject_dangling_o2o_relationship_missing_target,
+    inject_duplicate_e2o_relations_item_medium,
+    inject_duplicate_e2o_relations_order_easy,
+    inject_duplicate_e2o_relations_sales_person_hard,
+    inject_duplicate_o2o_relations_comprises_easy,
+    inject_duplicate_o2o_relations_places_medium,
+    inject_duplicate_o2o_relations_sales_rep_hard,
     inject_missing_object_item_medium,
     inject_missing_object_order_easy,
     inject_missing_object_product_hard,
+    inject_o2o_self_loop_employee_medium,
+    inject_o2o_self_loop_order_easy,
+    inject_o2o_self_loop_product_hard,
 )
 
 
@@ -73,7 +76,7 @@ def corrupt_database(
     src_path: str,
     dst_path: str | None = None,
     *,
-    level: str = "legacy",
+    level: str = "all",
 ) -> str:
     """Copy `src_path` to `dst_path` and inject corruptions for `level`.
 
@@ -96,15 +99,6 @@ def corrupt_database(
     return dst_path
 
 
-def _stage_legacy(conn: sqlite3.Connection) -> None:
-    """Reproduce the pre-`level` corruption sequence exactly."""
-    duplicate_id = inject_duplicate_objects_on_ids(conn)
-    inject_duplicate_objects_on_attributes(conn)
-    inject_missing_object_type(conn, exclude_id=duplicate_id)
-    inject_dangling_e2o_relationship_object(conn)
-    inject_dangling_e2o_relationship_event(conn)
-
-
 def _stage_easy(conn: sqlite3.Connection) -> None:
     # Object-side
     inject_duplicate_objects_on_ids_product(conn)   # duplicate_objects_on_ids first (uses PK-less object table)
@@ -121,6 +115,10 @@ def _stage_easy(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_null_confirm_easy(conn)
     # Relation-borne missing object
     inject_missing_object_order_easy(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_comprises_easy(conn)
+    inject_o2o_self_loop_order_easy(conn)
+    inject_duplicate_e2o_relations_order_easy(conn)
 
 
 def _stage_medium(conn: sqlite3.Connection) -> None:
@@ -139,6 +137,10 @@ def _stage_medium(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_empty_pay_medium(conn)
     # Relation-borne missing object
     inject_missing_object_item_medium(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_places_medium(conn)
+    inject_o2o_self_loop_employee_medium(conn)
+    inject_duplicate_e2o_relations_item_medium(conn)
 
 
 def _stage_hard(conn: sqlite3.Connection) -> None:
@@ -157,10 +159,13 @@ def _stage_hard(conn: sqlite3.Connection) -> None:
     inject_missing_event_type_whitespace_package_hard(conn)
     # Relation-borne missing object
     inject_missing_object_product_hard(conn)
+    # Incorrect-Data row (Relations)
+    inject_duplicate_o2o_relations_sales_rep_hard(conn)
+    inject_o2o_self_loop_product_hard(conn)
+    inject_duplicate_e2o_relations_sales_person_hard(conn)
 
 
 _LEVEL_STAGES: dict[str, list[Callable[[sqlite3.Connection], None]]] = {
-    "legacy": [_stage_legacy],
     "easy":   [_stage_easy],
     "medium": [_stage_medium],
     "hard":   [_stage_hard],
@@ -171,6 +176,5 @@ _LEVEL_STAGES: dict[str, list[Callable[[sqlite3.Connection], None]]] = {
 __all__ = [
     "corrupt_database",
     "DEFAULT_CLEAN_PATH",
-    "DEFAULT_DIRTY_PATH",
     "DEFAULT_FULL_PATH",
 ]
