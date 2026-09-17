@@ -87,8 +87,9 @@ def inject_dangling_e2o_relationship_missing_both(conn: sqlite3.Connection) -> t
 
 
 def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) -> tuple[str, str]:
-    """dangling_o2o_relationship Easy: Source id is a typo near-miss,
-    target is a real object."""
+    """dangling_o2o_relationship Easy: Source id is a typo near-miss of a
+    real employee, target is a real employee.
+    Example: 'Wil van der Aalts' (typo) → 'Wil van der Aalst' (real)"""
     obj_type = get_p2p_object_type("employees")
     qualifier = get_p2p_o2o_qualifier("processed_by")
 
@@ -108,7 +109,8 @@ def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) ->
 
 def inject_dangling_o2o_relationship_missing_target(conn: sqlite3.Connection) -> tuple[str, str]:
     """dangling_o2o_relationship Medium: Real source references a
-    typo near-miss target."""
+    typo near-miss target.
+    Example: Customer 'Balkan Minerals' → 'Wil van der Aslst' (l/s transposed)"""
     customers_type = get_p2p_object_type("customers")
     employee_type = get_p2p_object_type("employees")
     qualifier = get_p2p_o2o_qualifier("processed_by")
@@ -216,6 +218,8 @@ def inject_missing_object_product_hard(conn: sqlite3.Connection) -> dict | None:
     """missing_object Hard: delete a real material object referenced with
     qualifier 'product' from a 'place order' E2O row, leaving that row
     dangling.
+    Example: products:Echo Show 10 (plausible-sounding product in existing
+    family like Echo Show 5, Echo Show 8, but this id doesn't exist).
 
     Hard because material ids may not use type prefix consistently, so the
     LLM can't lean on id shape the way it could for the easy/medium cases.
