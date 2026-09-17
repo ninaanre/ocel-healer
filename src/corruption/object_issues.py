@@ -238,7 +238,8 @@ def inject_incorrect_attribute_datatype_string_in_order_price(conn: sqlite3.Conn
 
 def inject_incorrect_attribute_datatype_blob_in_role(conn: sqlite3.Connection) -> dict | None:
     """incorrect_attribute_datatype Hard: Put UTF-16-LE bytes into
-    payment AmountDMBTR field (TEXT)."""
+    employee role field (TEXT).
+    Example: 'Jan Niklas Adams' employee gets UTF-16-LE encoded role."""
     table = get_p2p_object_table("object_employees")
     row = conn.execute(
         f"SELECT ocel_id FROM {table} WHERE AmountDMBTR IS NOT NULL LIMIT 1"
@@ -320,8 +321,9 @@ def inject_duplicate_objects_on_attributes_clone_product(conn: sqlite3.Connectio
 
 
 def inject_duplicate_objects_on_attributes_clone_employee(conn: sqlite3.Connection) -> str | None:
-    """duplicate_objects_on_attributes Medium: Insert two payment objects with
-    same attributes - simulating duplicate master data records."""
+    """duplicate_objects_on_attributes Medium: Insert two employee objects with
+    same attributes - simulating duplicate master data records.
+    Example: 'Ada Nowak' and 'Ada Nowak (dup)' with identical consulting role."""
     employee_type = get_p2p_object_type("employees")
     table = get_p2p_object_table("object_employees")
 
