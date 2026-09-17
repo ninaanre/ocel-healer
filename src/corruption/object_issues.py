@@ -122,12 +122,12 @@ def inject_missing_attribute_value_null_product_weight(conn: sqlite3.Connection)
     """missing_attribute_value Easy: NULL the weight of a material."""
     table = get_p2p_object_table("object_products")
     row = conn.execute(
-        f"SELECT ocel_id FROM {table} WHERE QuantityEKPOMENGE IS NOT NULL LIMIT 1"
+        f"SELECT ocel_id FROM {table} WHERE weight IS NOT NULL LIMIT 1"
     ).fetchone()
     if row is None:
         return {"affected_ids": [], "original_values": {}}
     ocel_id = row[0]
-    old_value = _capture_and_update(conn, table, "QuantityEKPOMENGE", ocel_id, None)
+    old_value = _capture_and_update(conn, table, "weight", ocel_id, None)
     return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
 
