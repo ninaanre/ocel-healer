@@ -89,7 +89,7 @@ def inject_dangling_e2o_relationship_missing_both(conn: sqlite3.Connection) -> t
 def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) -> tuple[str, str]:
     """dangling_o2o_relationship Easy: Source id is a typo near-miss of a
     real employee, target is a real employee.
-    Example: 'Wil van der Aalts' (typo) → 'Wil van der Aalst' (real)"""
+    Example: 'Alex Rivers' (typo) → 'Alex Rivera' (real)"""
     obj_type = get_om_object_type("employees")
     qualifier = get_om_o2o_qualifier("processed_by")
 
@@ -110,7 +110,7 @@ def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) ->
 def inject_dangling_o2o_relationship_missing_target(conn: sqlite3.Connection) -> tuple[str, str]:
     """dangling_o2o_relationship Medium: Real source references a
     typo near-miss target.
-    Example: Customer 'Balkan Minerals' → 'Wil van der Aslst' (l/s transposed)"""
+    Example: Customer 'Balkan Minerals' → '<employee-id>-TYPO' (dangling target)"""
     customers_type = get_om_object_type("customers")
     employee_type = get_om_object_type("employees")
     qualifier = get_om_o2o_qualifier("processed_by")
@@ -226,11 +226,16 @@ def inject_missing_object_product_hard(conn: sqlite3.Connection) -> dict | None:
     """
     place_type = get_om_event_type("place order")
     product_qual = get_om_e2o_qualifier("product")
+    # Skip objects whose type has already been corrupted by an earlier
+    # injector in the same tier (`missing_object_type` picks the same
+    # product), so the two issues remain independently observable.
     row = conn.execute(
         "SELECT o.ocel_id, o.ocel_type FROM object o "
         "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
         "JOIN event e ON e.ocel_id = eo.ocel_event_id "
-        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? LIMIT 1",
+        "WHERE e.ocel_type = ? AND eo.ocel_qualifier = ? "
+        "  AND o.ocel_type IS NOT NULL AND TRIM(o.ocel_type) != '' "
+        "LIMIT 1",
         (place_type, product_qual),
     ).fetchone()
     if row is None:
@@ -338,9 +343,9 @@ def inject_o2o_self_loop_employee_medium(conn: sqlite3.Connection) -> str:
     structurally wrong for O2O."""
     conn.execute(
         "INSERT INTO object_object VALUES (?, ?, ?)",
-        ("Wil van der Aalst", "Wil van der Aalst", "primarySalesRep"),
+        ("Alex Rivera", "Alex Rivera", "primarySalesRep"),
     )
-    return "Wil van der Aalst"
+    return "Alex Rivera"
 
 
 def inject_o2o_self_loop_product_hard(conn: sqlite3.Connection) -> str:
