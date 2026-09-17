@@ -16,6 +16,8 @@
 
 ## Detection Results by Issue Type
 
+The "Detected / Injected" column shows the number of issues the system detected versus the number originally injected into the test data. Note that the detection count can exceed the injection count when the system identifies additional instances of the same issue type.
+
 | Issue Type | Difficulty | Detection Success | Recall | Precision | Detected / Injected |
 |---|---|---|---|---|---|
 | dangling_e2o_relationship | easy | 100.0% | 100.0% | 100.0% | 10 / 10 |
