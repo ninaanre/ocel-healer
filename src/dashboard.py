@@ -150,7 +150,7 @@ def llm_status(mo, llm_ready, set_active_model):
     reachable, available_models = llm_ready()
     if not reachable:
         _status = mo.md(
-            "⚠️ LLMs not reachable. Start Ollama Desktop or activate the SSH tunnel."
+            "⚠️ LLMs not reachable. Start Ollama Desktop (or point OLLAMA_HOST at your Ollama server)."
         ).callout(kind="warn")
     else:
         _status = mo.md(
@@ -177,9 +177,24 @@ def llm_model_apply(model_picker, reachable, set_active_model):
 
 
 @app.cell
-def file_picker(DATA_DIR, mo, os):
-    files = sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".sqlite"))
-    default = "new.sqlite" if "new.sqlite" in files else (files[0] if files else None)
+def file_picker(DATA_DIR, mo):
+    # Discover all sqlite files under data/ recursively, so files under
+    # data/synthetic/ and data/real-world/ both show up. Option values are
+    # paths relative to DATA_DIR so downstream `DATA_DIR / file_picker.value`
+    # keeps working.
+    files = sorted(
+        str(p.relative_to(DATA_DIR))
+        for p in DATA_DIR.rglob("*.sqlite")
+    )
+    # Prefer the corrupted synthetic log as the default so first render
+    # always has something to show; otherwise fall back to any synthetic
+    # file, otherwise the first available.
+    _preferred = "synthetic/order-management-corrupted.sqlite"
+    if _preferred in files:
+        default = _preferred
+    else:
+        _synthetic = [f for f in files if f.startswith("synthetic/")]
+        default = _synthetic[0] if _synthetic else (files[0] if files else None)
     file_picker = mo.ui.dropdown(options=files, value=default, label="OCEL File:")
     return (file_picker,)
 
