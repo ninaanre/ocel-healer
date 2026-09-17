@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from .p2p_mappings import (
-    get_p2p_object_type,
-    get_p2p_event_type,
-    get_p2p_e2o_qualifier,
-    get_p2p_o2o_qualifier,
+from .om_schema import (
+    get_om_object_type,
+    get_om_event_type,
+    get_om_e2o_qualifier,
+    get_om_o2o_qualifier,
 )
 
 
@@ -90,8 +90,8 @@ def inject_dangling_o2o_relationship_missing_source(conn: sqlite3.Connection) ->
     """dangling_o2o_relationship Easy: Source id is a typo near-miss of a
     real employee, target is a real employee.
     Example: 'Wil van der Aalts' (typo) → 'Wil van der Aalst' (real)"""
-    obj_type = get_p2p_object_type("employees")
-    qualifier = get_p2p_o2o_qualifier("processed_by")
+    obj_type = get_om_object_type("employees")
+    qualifier = get_om_o2o_qualifier("processed_by")
 
     dst = conn.execute(
         "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (obj_type,)
@@ -111,9 +111,9 @@ def inject_dangling_o2o_relationship_missing_target(conn: sqlite3.Connection) ->
     """dangling_o2o_relationship Medium: Real source references a
     typo near-miss target.
     Example: Customer 'Balkan Minerals' → 'Wil van der Aslst' (l/s transposed)"""
-    customers_type = get_p2p_object_type("customers")
-    employee_type = get_p2p_object_type("employees")
-    qualifier = get_p2p_o2o_qualifier("processed_by")
+    customers_type = get_om_object_type("customers")
+    employee_type = get_om_object_type("employees")
+    qualifier = get_om_o2o_qualifier("processed_by")
 
     src = conn.execute(
         "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
@@ -136,9 +136,9 @@ def inject_dangling_o2o_relationship_missing_target(conn: sqlite3.Connection) ->
 def inject_dangling_o2o_relationship_missing_both_typo(conn: sqlite3.Connection) -> tuple[str, str]:
     """dangling_o2o_relationship Hard: Both endpoints are typo near-misses
     of real ids."""
-    customers_type = get_p2p_object_type("customers")
-    employee_type = get_p2p_object_type("employees")
-    qualifier = get_p2p_o2o_qualifier("processed_by")
+    customers_type = get_om_object_type("customers")
+    employee_type = get_om_object_type("employees")
+    qualifier = get_om_o2o_qualifier("processed_by")
 
     src = conn.execute(
         "SELECT ocel_id FROM object WHERE ocel_type = ? LIMIT 1", (customers_type,)
@@ -176,8 +176,8 @@ def inject_missing_object_order_easy(conn: sqlite3.Connection) -> dict | None:
     Easy because the type is unambiguous from the surviving E2O qualifier,
     and the peer set for the LLM to imitate is large.
     """
-    place_type = get_p2p_event_type("place order")
-    order_qual = get_p2p_e2o_qualifier("order")
+    place_type = get_om_event_type("place order")
+    order_qual = get_om_e2o_qualifier("order")
     row = conn.execute(
         "SELECT o.ocel_id, o.ocel_type FROM object o "
         "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
@@ -198,8 +198,8 @@ def inject_missing_object_item_medium(conn: sqlite3.Connection) -> dict | None:
 
     Medium because materials are used in multiple contexts.
     """
-    pick_type = get_p2p_event_type("pick item")
-    item_qual = get_p2p_e2o_qualifier("item")
+    pick_type = get_om_event_type("pick item")
+    item_qual = get_om_e2o_qualifier("item")
     row = conn.execute(
         "SELECT o.ocel_id, o.ocel_type FROM object o "
         "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
@@ -224,8 +224,8 @@ def inject_missing_object_product_hard(conn: sqlite3.Connection) -> dict | None:
     Hard because material ids may not use type prefix consistently, so the
     LLM can't lean on id shape the way it could for the easy/medium cases.
     """
-    place_type = get_p2p_event_type("place order")
-    product_qual = get_p2p_e2o_qualifier("product")
+    place_type = get_om_event_type("place order")
+    product_qual = get_om_e2o_qualifier("product")
     row = conn.execute(
         "SELECT o.ocel_id, o.ocel_type FROM object o "
         "JOIN event_object eo ON eo.ocel_object_id = o.ocel_id "
@@ -265,7 +265,7 @@ def inject_duplicate_o2o_relations_comprises_easy(
     conn: sqlite3.Connection,
 ) -> tuple[str, str, str]:
     """duplicate_o2o_relations Easy: insert duplicate o2o triple."""
-    qual = get_p2p_o2o_qualifier("comprises")
+    qual = get_om_o2o_qualifier("comprises")
     row = conn.execute(
         "SELECT ocel_source_id, ocel_target_id FROM object_object WHERE ocel_qualifier = ? LIMIT 1", (qual,)
     ).fetchone()
