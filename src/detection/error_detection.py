@@ -693,9 +693,20 @@ def detect_missing_object(src: SqliteInput) -> pl.DataFrame:
         }
         # Type prefixes we consider legitimate (e.g. `orders:`, `items:`).
         prefixes = [ocel_type for ocel_type, _ in _object_type_tables(conn)]
-        # Products don't follow the `<type>:<id>` convention; their `ocel_id`
-        # is a bare product name. We rely purely on the referring qualifier
-        # `product` to catch those.
+        # Some logs (e.g. Order Management) don't use the `<type>:<id>`
+        # convention: order ids look like `o-990001`, items like `i-880001`,
+        # products/customers/employees are bare names. Fall back to a
+        # qualifier hint: E2O qualifiers are typically the singular form
+        # of the object type (`order` → `orders`, `product` → `products`).
+        # We match against the actual set of object types so we don't
+        # guess types that don't exist in this log.
+        _qualifier_to_type = {}
+        for ptype in prefixes:
+            # Naive singular: strip trailing 's' if the plural form is
+            # still recognisable. Keeps the mapping data-driven.
+            singular = ptype[:-1] if ptype.endswith("s") and len(ptype) > 1 else ptype
+            _qualifier_to_type[singular] = ptype
+            _qualifier_to_type[ptype] = ptype
         rows: list[dict] = []
         for ocel_event_id, ocel_object_id, ocel_qualifier in conn.execute(
             "SELECT ocel_event_id, ocel_object_id, ocel_qualifier FROM event_object"
@@ -708,8 +719,8 @@ def detect_missing_object(src: SqliteInput) -> pl.DataFrame:
                 if isinstance(ocel_object_id, str) and ocel_object_id.startswith(f"{ptype}:"):
                     inferred = ptype
                     break
-            if inferred is None and ocel_qualifier == "product":
-                inferred = "products"
+            if inferred is None and ocel_qualifier in _qualifier_to_type:
+                inferred = _qualifier_to_type[ocel_qualifier]
             if inferred is None:
                 # Opaque id (no prefix, no qualifier hint) → leave to the
                 # dangling detector; we'd only be guessing.

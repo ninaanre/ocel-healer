@@ -3,8 +3,8 @@
 """CLI for the exploration agent.
 
 Usage:
-    python -m src.exploration data/order-management-dirty.sqlite
-    python -m src.exploration data/foo.sqlite --model mistral-small3.2:latest
+    python -m src.exploration data/synthetic/order-management-corrupted.sqlite
+    python -m src.exploration data/foo.sqlite --model qwen3:8b
 
 Writes exploration_profile.json, exploration_guide.json and
 exploration_report.md into <base-dir>/<db-stem>/ (default: data/exploration/,

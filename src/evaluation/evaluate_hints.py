@@ -284,8 +284,8 @@ def render_eval_report(meta: dict, records: list[dict]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="mistral-small3.2:latest")
-    parser.add_argument("--clean-db", default="data/order-management-clean.sqlite")
+    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--clean-db", default="data/synthetic/order-management-baseline.sqlite")
     parser.add_argument("--eval-dir", default="data/evaluation")
     args = parser.parse_args()
 

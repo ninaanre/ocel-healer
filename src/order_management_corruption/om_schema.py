@@ -40,16 +40,19 @@ def get_om_object_type(om_type: str) -> str:
         om_type: Object type key (e.g., "orders", "products")
 
     Returns:
-        Object type name in OM database (e.g., "Orders", "Products")
+        Object type name as stored in the ``object.ocel_type`` column
+        (lowercase in the current OM baseline log).
     """
-    # Map lowercase keys to actual Order Management type names (with capitals)
+    # The synthetic OM baseline stores ocel_type values in lowercase
+    # (`products`, `employees`, …). Keep this identity map explicit so a
+    # future re-generation of the log with different casing shows up here.
     OM_TYPE_NAMES = {
-        "orders": "Orders",
-        "items": "Items",
-        "packages": "Packages",
-        "customers": "Customers",
-        "products": "Products",
-        "employees": "Employees",
+        "orders": "orders",
+        "items": "items",
+        "packages": "packages",
+        "customers": "customers",
+        "products": "products",
+        "employees": "employees",
     }
     return OM_TYPE_NAMES.get(om_type, om_type)
 

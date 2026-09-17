@@ -13,8 +13,11 @@ This project investigates how data quality issues in OCELs can be detected and r
     - `exploration/` - exploration agent: profiles a log and produces repair hints
     - `evaluation/` - measures repair quality with vs without exploration hints
     - `llm/` - LLM integration (client, per-issue repair tasks)
+    - `order_management_corruption/` - corruption injectors used to build the synthetic dirty log
     - `dashboard.py` - marimo dashboard
-- `data/` – object-centric event logs
+    - `dashboard_render.py` - dashboard rendering helpers
+    - `intro.ipynb` - introductory notebook walking through the pipeline
+- `data/` – object-centric event logs (`synthetic/`, `real-world/`)
 
 ## Exploration agent
 
@@ -27,7 +30,7 @@ Run it either from the dashboard (pick a file and a model, press
 **🔎 Run exploration**) or from the CLI:
 
 ```bash
-python -m src.exploration data/order-management-dirty.sqlite --model mistral-small3.2:latest
+python -m src.exploration data/synthetic/order-management-corrupted.sqlite --model qwen3:8b
 ```
 
 Artifacts land in `data/exploration/<db-stem>/` next to the data, where the
@@ -37,14 +40,12 @@ repair tasks automatically pick them up:
 - `exploration_profile.json` – deterministic facts (source of truth for hints)
 - `exploration_guide.json` – LLM interpretations (optional layer)
 
-Repair works without them too: hints degrade gracefully when no exploration was run. 
-Use a non-reasoning model (e.g. `mistral-small3.2`, `llama3.1:8b`), 
-reasoning-heavy models (`qwen3.5`, `phi4-reasoning`, `gpt-oss`) exceed the per-section timeout.
+Repair works without them too: hints degrade gracefully when no exploration was run.
 
 ## Evaluating exploration hints
 
 ```bash
-python -m src.evaluation.evaluate_hints --model mistral-small3.2:latest
+python -m src.evaluation.evaluate_hints --model qwen3:8b
 python -m src.evaluation.summarize_runs   # refresh data/evaluation/summary.md
 ```
 
@@ -52,8 +53,6 @@ Each run corrupts a copy of the clean log with known groundtruth, repairs
 every injected violation twice (with and without hints) and archives all
 artifacts under `data/evaluation/runs/<timestamp>-<model>/`. The cross-run
 summary lives in `data/evaluation/summary.md`.
-
-For now only for missing_attribute_values Issue
 
 ## Setup
 
@@ -77,7 +76,7 @@ marimo run src/dashboard.py
 
 marimo will open the dashboard in your browser. If you want to edit cells while running, use `marimo edit src/dashboard.py` instead.
 
-The dashboard runs the rule-based detection out of the box. The LLM-based repair suggestions only become available once a local Ollama server is running with the configured model pulled (see next section).
+The dashboard preselects a synthetic dataset (`data/synthetic/order-management-corrupted.sqlite`); pick a different file from the dropdown to explore another log. The rule-based detection runs out of the box. The LLM-based repair suggestions only become available once a local Ollama server is running with the configured model pulled (see next section).
 
 ## Setting up the LLM (Ollama on macOS)
 
@@ -110,10 +109,10 @@ Leave that terminal open; the dashboard talks to this server.
 In another terminal, pull the default model used by the dashboard:
 
 ```bash
-ollama pull qwen2.5:7b
+ollama pull qwen3:8b
 ```
 
-This downloads ~4–5 GB on first run. You can verify it's available with:
+This downloads ~5 GB on first run. You can verify it's available with:
 
 ```bash
 ollama list
@@ -121,19 +120,19 @@ ollama list
 
 ### 4. (Optional) Use a different model or host
 
-The LLM client reads three environment variables (see `src/llm.py`):
+The LLM client reads three environment variables (see `src/llm/client.py`):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OCEL_LLM_MODEL` | `qwen2.5:7b` | Ollama model name to call. |
+| `OCEL_LLM_MODEL` | `qwen3:8b` | Ollama model name to call. |
 | `OLLAMA_HOST` | `http://localhost:11434` | Where to reach the Ollama server. |
-| `OCEL_LLM_MIN_CONFIDENCE` | `0.5` | Minimum confidence for a suggestion to be applied (lower → more, riskier suggestions). |
+| `OCEL_LLM_MIN_CONFIDENCE` | `0.4` | Minimum confidence for a suggestion to be applied (lower → more, riskier suggestions). |
 
 Set them before launching marimo, e.g.:
 
 ```bash
-export OCEL_LLM_MODEL=llama3.1:8b
-ollama pull llama3.1:8b
+export OCEL_LLM_MODEL=qwen3:8b
+ollama pull qwen3:8b
 marimo run src/dashboard.py
 ```
 
@@ -141,6 +140,6 @@ marimo run src/dashboard.py
 
 Once the server is up and the model is pulled, the dashboard's "LLM status" panel should show:
 
-> ✅ LLM ready: model `qwen2.5:7b`.
+> ✅ LLM ready: model `qwen3:8b`.
 
 If it complains that Ollama is unreachable, check that `ollama serve` (or the Ollama app) is running. If it says the model is not pulled, run `ollama pull <model-name>`.
