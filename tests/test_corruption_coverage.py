@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.corruption import DEFAULT_CLEAN_PATH, corrupt_database
+from src.order_management_corruption import DEFAULT_CLEAN_PATH, corrupt_database
 from src.detection.error_detection import detect_all
 
 RULE_DETECTORS = (
