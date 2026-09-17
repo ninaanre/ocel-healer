@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.corruption._common import inject_missing_attribute_value
+from src.order_management_corruption._common import inject_missing_attribute_value
 from src.detection.error_detection import detect_all
 from src.exploration import explore_database
 from src.llm.client import set_active_model
