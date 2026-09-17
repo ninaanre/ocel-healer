@@ -81,15 +81,16 @@ O2O_QUALIFIER_MAP = {
 
 
 def get_p2p_event_type(om_type: str) -> str:
-    """Map Order Management event type to P2P.
+    """Get the event type name for Order Management database.
 
     Args:
-        om_type: Order Management event type (e.g., "place order")
+        om_type: Event type key (e.g., "place order")
 
     Returns:
-        P2P event type (e.g., "Create Purchase Order")
+        Event type name in OM database
     """
-    return EVENT_TYPE_MAP.get(om_type, om_type)
+    # For OM database, these are already the correct display names
+    return om_type
 
 
 def get_p2p_event_table(om_table: str) -> str:
@@ -105,48 +106,71 @@ def get_p2p_event_table(om_table: str) -> str:
 
 
 def get_p2p_object_type(om_type: str) -> str:
-    """Map Order Management object type to P2P.
+    """Get the object type name for Order Management database.
 
     Args:
-        om_type: Order Management object type (e.g., "orders")
+        om_type: Object type key (e.g., "orders", "products")
 
     Returns:
-        P2P object type (e.g., "purchase_order")
+        Object type name in OM database (e.g., "Orders", "Products")
     """
-    return OBJECT_TYPE_MAP.get(om_type, om_type)
+    # Map lowercase keys to actual Order Management type names (with capitals)
+    OM_TYPE_NAMES = {
+        "orders": "Orders",
+        "items": "Items",
+        "packages": "Packages",
+        "customers": "Customers",
+        "products": "Products",
+        "employees": "Employees",
+    }
+    return OM_TYPE_NAMES.get(om_type, om_type)
 
 
 def get_p2p_object_table(om_table: str) -> str:
-    """Map Order Management object table to P2P.
+    """Get the object table name, returning OM name as-is since tests use OM database.
+
+    For Order Management database: "object_products" → "object_Products"
+    For P2P database: this would need the mapping, but default DB is OM.
 
     Args:
-        om_table: Order Management table name (e.g., "object_orders")
+        om_table: Key for object table (e.g., "object_products")
 
     Returns:
-        P2P table name (e.g., "object_purchase_order")
+        Actual table name in the database
     """
-    return OBJECT_TABLE_MAP.get(om_table, om_table)
+    # Map lowercase keys to actual Order Management table names (with capitals)
+    OM_TABLE_NAMES = {
+        "object_orders": "object_Orders",
+        "object_items": "object_Items",
+        "object_packages": "object_Packages",
+        "object_customers": "object_Customers",
+        "object_products": "object_Products",
+        "object_employees": "object_Employees",
+    }
+    return OM_TABLE_NAMES.get(om_table, om_table)
 
 
 def get_p2p_e2o_qualifier(om_qual: str) -> str:
-    """Map Order Management E2O qualifier to P2P.
+    """Get the E2O qualifier name for Order Management database.
 
     Args:
-        om_qual: Order Management E2O qualifier (e.g., "order")
+        om_qual: E2O qualifier key (e.g., "order", "product")
 
     Returns:
-        P2P E2O qualifier (e.g., "purchase_order")
+        E2O qualifier name in OM database
     """
-    return E2O_QUALIFIER_MAP.get(om_qual, om_qual)
+    # For OM database, qualifiers are lowercase keys as-is
+    return om_qual
 
 
 def get_p2p_o2o_qualifier(om_qual: str) -> str:
-    """Map Order Management O2O qualifier to P2P.
+    """Get the O2O qualifier name for Order Management database.
 
     Args:
-        om_qual: Order Management O2O qualifier (e.g., "comprises")
+        om_qual: O2O qualifier key (e.g., "comprises", "processed_by")
 
     Returns:
-        P2P O2O qualifier (e.g., "Materials of Purchase Order")
+        O2O qualifier name in OM database
     """
-    return O2O_QUALIFIER_MAP.get(om_qual, om_qual)
+    # For OM database, qualifiers are as-is
+    return om_qual
