@@ -30,18 +30,64 @@ from .p2p_mappings import (
 # ---------------------------------------------------------------------------
 
 
+def _pick_event_with_relations(
+    conn: sqlite3.Connection, table: str, *, require_neighbor: bool = False
+) -> str | None:
+    """Pick an `ocel_id` from `table` that's actually resolvable, instead of
+    blindly grabbing the first row.
+
+    Without this, `SELECT ocel_id FROM {table} LIMIT 1` (no ORDER BY, no
+    relational check) deterministically returns whichever row SQLite
+    happens to store first -- on the real P2P dataset that can easily be an
+    event with zero `event_object` rows at all, which makes the resulting
+    "infer the missing timestamp from neighbor events" task impossible by
+    construction, not merely hard. Confirmed via `resolution_noop_reasons`:
+    both easy and hard runs landed on such an event, every run, for exactly
+    this reason.
+
+    `require_neighbor=True` (used for "easy") additionally requires at
+    least one OTHER event to share an object with the candidate, so the
+    tier's own premise -- "clear bracketing signal" -- actually holds.
+    "medium"/"hard" only require the event isn't fully orphaned, preserving
+    their intended sparse-signal difficulty rather than guaranteeing a
+    clean bracket.
+    """
+    if require_neighbor:
+        query = f"""
+            SELECT DISTINCT e.ocel_id
+            FROM "{table}" e
+            JOIN event_object eo ON eo.ocel_event_id = e.ocel_id
+            JOIN event_object eo2
+                ON eo2.ocel_object_id = eo.ocel_object_id
+               AND eo2.ocel_event_id != e.ocel_id
+            LIMIT 1
+        """
+    else:
+        query = f"""
+            SELECT e.ocel_id
+            FROM "{table}" e
+            WHERE EXISTS (
+                SELECT 1 FROM event_object eo WHERE eo.ocel_event_id = e.ocel_id
+            )
+            LIMIT 1
+        """
+    row = conn.execute(query).fetchone()
+    return row[0] if row else None
+
+
 def inject_missing_event_timestamp_null_place_order_easy(conn: sqlite3.Connection) -> dict | None:
     """missing_event_timestamp Easy: NULL the ocel_time on one `event_PlaceOrder` row.
 
     Easy because `place order` is the first event in the lifecycle, so its
     neighbors are all upper bounds — the resolver has a clear "must be
-    before X" signal from the order's later events.
+    before X" signal from the order's later events. The candidate is
+    required to actually have such a neighbor (see
+    `_pick_event_with_relations`) so that promise holds in practice.
     """
     table = get_p2p_event_table("event_PlaceOrder")
-    row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
-    if row is None:
+    ocel_id = _pick_event_with_relations(conn, table, require_neighbor=True)
+    if ocel_id is None:
         return None
-    ocel_id = row[0]
     old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, None)
     return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
@@ -51,13 +97,14 @@ def inject_missing_event_timestamp_empty_pick_item_medium(conn: sqlite3.Connecti
 
     Medium because empty-string trips the detector but a naive `IS NULL`
     filter misses it, and `pick item` sits deep in the lifecycle with
-    tighter bracketing constraints from both sides.
+    tighter bracketing constraints from both sides. The candidate is only
+    required to have SOME relation (not fully orphaned) — sparser than
+    "easy"'s guaranteed neighbor, on purpose.
     """
     table = get_p2p_event_table("event_PickItem")
-    row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
-    if row is None:
+    ocel_id = _pick_event_with_relations(conn, table, require_neighbor=False)
+    if ocel_id is None:
         return None
-    ocel_id = row[0]
     old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, "")
     return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
@@ -67,13 +114,15 @@ def inject_missing_event_timestamp_null_item_out_of_stock_hard(conn: sqlite3.Con
 
     Hard because `item out of stock` is a rare, off-happy-path event with
     sparse peer signal — bracketing must come from the item's own history
-    rather than a typical order lifecycle.
+    rather than a typical order lifecycle. Still requires at least one
+    `event_object` relation to exist so the task is merely hard, not
+    unsolvable: a fully orphaned event isn't a harder reasoning case, it's
+    a degenerate one no method could bracket.
     """
     table = get_p2p_event_table("event_ItemOutOfStock")
-    row = conn.execute(f"SELECT ocel_id FROM {table} LIMIT 1").fetchone()
-    if row is None:
+    ocel_id = _pick_event_with_relations(conn, table, require_neighbor=False)
+    if ocel_id is None:
         return None
-    ocel_id = row[0]
     old_value = _capture_and_update(conn, table, "ocel_time", ocel_id, None)
     return {"affected_ids": [ocel_id], "original_values": {ocel_id: old_value}}
 
